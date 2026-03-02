@@ -42,8 +42,6 @@ class _SecurityPageState extends State<SecurityPage> {
       return;
     }
 
-    // In a real app, you would load the user's preference from storage.
-    // For this example, we'll just keep it in the state.
     setState(() {
       _status = _isBiometricEnabled
           ? 'Biometric authentication is enabled.'
@@ -54,13 +52,11 @@ class _SecurityPageState extends State<SecurityPage> {
   Future<void> _authenticate() async {
     bool authenticated = false;
     try {
+      // local_auth v3: use authMessages + direct named params, no AuthenticationOptions
       authenticated = await _auth.authenticate(
         localizedReason: 'Scan your fingerprint or face to authenticate',
-        options: const AuthenticationOptions(
-          biometricOnly: true,
-          stickyAuth: true,
-          useErrorDialogs: true,
-        ),
+        biometricOnly: true,
+        persistAcrossBackgrounding: true, // replaces stickyAuth in v3
       );
     } on PlatformException catch (e) {
       setState(() {
