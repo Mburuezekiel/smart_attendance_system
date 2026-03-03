@@ -2,6 +2,7 @@ import 'package:edutrack_mut/core/usecases/role.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+// ignore: unused_import
 import '../../../../../core/theme/theme_controller.dart';
 
 class QRScanPage extends StatefulWidget {
@@ -228,6 +229,7 @@ class QrScannerOverlayShape extends ShapeBorder {
   @override
   void paint(Canvas canvas, Rect rect, {TextDirection? textDirection}) {
     final width = rect.width;
+    // ignore: unused_local_variable
     final borderWidthSize = width / 2;
     final height = rect.height;
     final borderOffset = borderWidth / 2;
@@ -244,6 +246,7 @@ class QrScannerOverlayShape extends ShapeBorder {
       ..style = PaintingStyle.stroke
       ..strokeWidth = borderWidth;
 
+    // ignore: unused_local_variable
     final boxPaint = Paint()
       ..color = borderColor
       ..style = PaintingStyle.fill;

@@ -1,88 +1,63 @@
 // lib/core/services/api_service.dart
-// ─────────────────────────────────────────────────────────────────────────────
-// Centralised HTTP client for MUT SmartTrack.
-//
-// BASE URL QUICK REFERENCE:
-//   Flutter Web (Chrome)        → http://localhost:5000   ← YOUR CURRENT SETUP
-//   Android Emulator            → http://10.0.2.2:5000
-//   iOS Simulator               → http://localhost:5000
-//   Physical Android/iOS device → http://<YOUR_LAN_IP>:5000
-//
-// pubspec.yaml dependencies:
-//   http: ^1.2.1
-//   shared_preferences: ^2.2.3
-// ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-// ── Result wrapper ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ApiResult — wraps every response so callers never deal with try/catch
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ApiResult<T> {
-  final bool success;
-  final T? data;
+  final bool    success;
+  final T?      data;
   final String? error;
 
-  const ApiResult.ok(this.data)
-      : success = true,
-        error = null;
-
-  const ApiResult.err(this.error)
-      : success = false,
-        data = null;
+  const ApiResult.ok(this.data)   : success = true,  error = null;
+  const ApiResult.err(this.error) : success = false,  data  = null;
 }
 
-// ── Service ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ApiService — singleton HTTP client
+// ─────────────────────────────────────────────────────────────────────────────
 
 class ApiService {
-  // ── Singleton ──────────────────────────────────────────────────────────────
-  static final ApiService _instance = ApiService._internal();
+  ApiService._();
+  static final ApiService _instance = ApiService._();
   factory ApiService() => _instance;
-  ApiService._internal();
 
-  // ── Base URL (auto-detected by platform) ───────────────────────────────────
-  // Physical device: replace with your machine's LAN IP, e.g. 192.168.1.5
-  static const String _lanIp = '192.168.1.5'; // ← change for physical device
+  // ── Base URL ────────────────────────────────────────────────────────────────
+  // Flutter Web            → localhost:5000
+  // Android emulator       → 10.0.2.2:5000
+  // Physical device / LAN  → change _lanIp below
+  static const String _lanIp = '192.168.1.5';
 
   static String get baseUrl {
-    if (kIsWeb) {
-      // Flutter Web in Chrome — same machine as the backend
-      return 'http://localhost:5000';
-    }
-    // Android Emulator routes host machine via 10.0.2.2
-    // iOS Simulator can use localhost directly
-    // Uncomment the relevant line:
-    return 'http://10.0.2.2:5000';              // Android emulator
-    // return 'http://localhost:5000';           // iOS simulator
-    // return 'http://$_lanIp:5000';            // Physical device
+    if (kIsWeb) return 'http://localhost:5000';
+    return 'http://10.0.2.2:5000';
+    // return 'http://localhost:5000';      // iOS simulator
+    // return 'http://$_lanIp:5000';        // physical device
   }
 
-  // ── Storage keys ───────────────────────────────────────────────────────────
-  static const _tokenKey = 'auth_token';
-  static const _userKey  = 'auth_user';
+  // ── SharedPreferences keys ──────────────────────────────────────────────────
+  static const String _tokenKey = 'auth_token';
+  static const String _userKey  = 'auth_user';
 
-  // ── Token helpers ──────────────────────────────────────────────────────────
+  // ── Token / session helpers ─────────────────────────────────────────────────
 
-  Future<void> saveToken(String token) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_tokenKey, token);
-  }
+  Future<String?> getToken() async =>
+      (await SharedPreferences.getInstance()).getString(_tokenKey);
 
-  Future<String?> getToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_tokenKey);
-  }
+  Future<void> saveToken(String token) async =>
+      (await SharedPreferences.getInstance()).setString(_tokenKey, token);
 
-  Future<void> saveUser(Map<String, dynamic> user) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_userKey, jsonEncode(user));
-  }
+  Future<void> saveUser(Map<String, dynamic> user) async =>
+      (await SharedPreferences.getInstance())
+          .setString(_userKey, jsonEncode(user));
 
   Future<Map<String, dynamic>?> getUser() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_userKey);
+    final raw = (await SharedPreferences.getInstance()).getString(_userKey);
     if (raw == null) return null;
     return jsonDecode(raw) as Map<String, dynamic>;
   }
@@ -95,9 +70,11 @@ class ApiService {
 
   Future<bool> get isLoggedIn async => (await getToken()) != null;
 
-  // ── Headers ────────────────────────────────────────────────────────────────
+  // ── HTTP headers ────────────────────────────────────────────────────────────
 
-  Map<String, String> get _jsonHeaders => {'Content-Type': 'application/json'};
+  static const Map<String, String> _jsonHeaders = {
+    'Content-Type': 'application/json',
+  };
 
   Future<Map<String, String>> get _authHeaders async {
     final token = await getToken();
@@ -107,51 +84,77 @@ class ApiService {
     };
   }
 
-  // ── POST /api/auth/signup ─────────────────────────────────────────────────
+  // ── Internal helpers ────────────────────────────────────────────────────────
+
+  /// Decodes the response and returns an [ApiResult].
+  ApiResult<Map<String, dynamic>> _handle(http.Response res) {
+    debugPrint('[API] ${res.request?.method} ${res.request?.url} → ${res.statusCode}');
+    try {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        return ApiResult.ok(body);
+      }
+      final msg = body['message'] as String? ?? 'Error ${res.statusCode}';
+      return ApiResult.err(msg);
+    } catch (_) {
+      return ApiResult.err('Unexpected response from server');
+    }
+  }
+
+  String _friendlyError(Exception e) {
+    final s = e.toString();
+    if (s.contains('SocketException') ||
+        s.contains('Connection refused') ||
+        s.contains('Failed host lookup')) {
+      return 'Cannot reach server. Is it running on port 5000?';
+    }
+    if (s.contains('TimeoutException')) {
+      return 'Request timed out. Check your server.';
+    }
+    if (s.contains('XMLHttpRequest') || s.contains('CORS')) {
+      return 'CORS error. Check server configuration.';
+    }
+    return 'Unexpected error: $s';
+  }
+
+  // ── POST /api/auth/signup ───────────────────────────────────────────────────
 
   Future<ApiResult<Map<String, dynamic>>> signup({
     required String fullName,
     required String registrationNumber,
     required String email,
     required String password,
+    String role = 'student',
   }) async {
     try {
-      final uri = Uri.parse('$baseUrl/api/auth/signup');
-      debugPrint('[API] POST $uri');
-
       final res = await http
           .post(
-            uri,
+            Uri.parse('$baseUrl/api/auth/signup'),
             headers: _jsonHeaders,
             body: jsonEncode({
-              'fullName': fullName,
+              'fullName':           fullName,
               'registrationNumber': registrationNumber,
-              'email': email,
-              'password': password,
+              'email':              email,
+              'password':           password,
+              'role':               role,         // ← always included
             }),
           )
           .timeout(const Duration(seconds: 15));
 
-      debugPrint('[API] signup → ${res.statusCode}: ${res.body}');
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-
-      if (res.statusCode == 200 || res.statusCode == 201) {
-        final token = body['token'] as String?;
-        final user  = body['user']  as Map<String, dynamic>?;
+      final result = _handle(res);
+      if (result.success) {
+        final token = result.data?['token'] as String?;
+        final user  = result.data?['user']  as Map<String, dynamic>?;
         if (token != null) await saveToken(token);
         if (user  != null) await saveUser(user);
-        return ApiResult.ok(body);
       }
-
-      return ApiResult.err(
-          body['message'] as String? ?? 'Signup failed (${res.statusCode})');
+      return result;
     } on Exception catch (e) {
-      debugPrint('[API] signup error: $e');
       return ApiResult.err(_friendlyError(e));
     }
   }
 
-  // ── POST /api/auth/login ──────────────────────────────────────────────────
+  // ── POST /api/auth/login ────────────────────────────────────────────────────
 
   Future<ApiResult<Map<String, dynamic>>> login({
     required String email,
@@ -159,115 +162,67 @@ class ApiService {
     required String role,
   }) async {
     try {
-      final uri = Uri.parse('$baseUrl/api/auth/login');
-      debugPrint('[API] POST $uri');
-
       final res = await http
           .post(
-            uri,
+            Uri.parse('$baseUrl/api/auth/login'),
             headers: _jsonHeaders,
             body: jsonEncode({
-              'email': email,
+              'email':    email,
               'password': password,
-              'role': role,
+              'role':     role,
             }),
           )
           .timeout(const Duration(seconds: 15));
 
-      debugPrint('[API] login → ${res.statusCode}: ${res.body}');
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-
-      if (res.statusCode == 200) {
-        final token = body['token'] as String?;
-        final user  = body['user']  as Map<String, dynamic>?;
+      final result = _handle(res);
+      if (result.success) {
+        final token = result.data?['token'] as String?;
+        final user  = result.data?['user']  as Map<String, dynamic>?;
         if (token != null) await saveToken(token);
         if (user  != null) await saveUser(user);
-        return ApiResult.ok(body);
       }
-
-      return ApiResult.err(
-          body['message'] as String? ?? 'Login failed (${res.statusCode})');
+      return result;
     } on Exception catch (e) {
-      debugPrint('[API] login error: $e');
       return ApiResult.err(_friendlyError(e));
     }
   }
 
-  // ── POST /api/biometric/fingerprint ──────────────────────────────────────
+  // ── POST /api/biometric/fingerprint ────────────────────────────────────────
 
   Future<ApiResult<Map<String, dynamic>>> registerFingerprint() async {
     try {
-      final headers = await _authHeaders;
-      final uri     = Uri.parse('$baseUrl/api/biometric/fingerprint');
-      debugPrint('[API] POST $uri');
-
       final res = await http
           .post(
-            uri,
-            headers: headers,
+            Uri.parse('$baseUrl/api/biometric/fingerprint'),
+            headers: await _authHeaders,
             body: jsonEncode({'biometricRegistered': true}),
           )
           .timeout(const Duration(seconds: 15));
-
-      debugPrint('[API] fingerprint → ${res.statusCode}: ${res.body}');
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-
-      if (res.statusCode == 200 || res.statusCode == 201) return ApiResult.ok(body);
-      return ApiResult.err(body['message'] as String? ?? 'Fingerprint registration failed');
+      return _handle(res);
     } on Exception catch (e) {
-      debugPrint('[API] fingerprint error: $e');
       return ApiResult.err(_friendlyError(e));
     }
   }
 
-  // ── POST /api/biometric/faceid ────────────────────────────────────────────
+  // ── POST /api/biometric/faceid ──────────────────────────────────────────────
 
   Future<ApiResult<Map<String, dynamic>>> registerFaceId({
     String? base64Image,
   }) async {
     try {
-      final headers = await _authHeaders;
-      final uri     = Uri.parse('$baseUrl/api/biometric/faceid');
-      debugPrint('[API] POST $uri');
-
       final res = await http
           .post(
-            uri,
-            headers: headers,
+            Uri.parse('$baseUrl/api/biometric/faceid'),
+            headers: await _authHeaders,
             body: jsonEncode({
               'faceRegistered': true,
               if (base64Image != null) 'image': base64Image,
             }),
           )
           .timeout(const Duration(seconds: 20));
-
-      debugPrint('[API] faceid → ${res.statusCode}: ${res.body}');
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-
-      if (res.statusCode == 200 || res.statusCode == 201) return ApiResult.ok(body);
-      return ApiResult.err(body['message'] as String? ?? 'Face ID registration failed');
+      return _handle(res);
     } on Exception catch (e) {
-      debugPrint('[API] faceid error: $e');
       return ApiResult.err(_friendlyError(e));
     }
-  }
-
-  // ── Friendly error messages ────────────────────────────────────────────────
-
-  String _friendlyError(Exception e) {
-    final msg = e.toString();
-    if (msg.contains('SocketException') ||
-        msg.contains('Connection refused') ||
-        msg.contains('Network is unreachable') ||
-        msg.contains('Failed host lookup')) {
-      return 'Cannot reach server. Is it running on port 5000?';
-    }
-    if (msg.contains('TimeoutException')) {
-      return 'Request timed out. Check your server is running.';
-    }
-    if (msg.contains('XMLHttpRequest') || msg.contains('CORS')) {
-      return 'CORS error — see server fix instructions.';
-    }
-    return 'Error: $msg';
   }
 }

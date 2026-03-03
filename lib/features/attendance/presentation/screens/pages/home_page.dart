@@ -1,3 +1,5 @@
+// ignore_for_file: unused_field
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_nav_bar/google_nav_bar.dart';
@@ -356,6 +358,7 @@ class _AttendanceWarningCard extends StatelessWidget {
 
 class _AttendanceRingCard extends StatelessWidget {
   static const _green700 = Color(0xFF2E7D32);
+  
   static const _green100 = Color(0xFFE8F5E9);
 
   @override
