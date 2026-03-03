@@ -132,10 +132,10 @@ class AppTheme {
       linearTrackColor: Color(0xFFE0E0E0),
     ),
     switchTheme: SwitchThemeData(
-      thumbColor: MaterialStateProperty.resolveWith(
-          (s) => s.contains(MaterialState.selected) ? Colors.white : Colors.white),
-      trackColor: MaterialStateProperty.resolveWith(
-          (s) => s.contains(MaterialState.selected) ? _green : Colors.grey.shade300),
+      thumbColor: WidgetStateProperty.resolveWith(
+          (s) => s.contains(WidgetState.selected) ? Colors.white : Colors.white),
+      trackColor: WidgetStateProperty.resolveWith(
+          (s) => s.contains(WidgetState.selected) ? _green : Colors.grey.shade300),
     ),
     snackBarTheme: SnackBarThemeData(
       backgroundColor: const Color(0xFF1B1B1B),
@@ -229,10 +229,10 @@ class AppTheme {
       linearTrackColor: Color(0xFF2A2A2A),
     ),
     switchTheme: SwitchThemeData(
-      thumbColor: MaterialStateProperty.resolveWith(
+      thumbColor: WidgetStateProperty.resolveWith(
           (s) => Colors.white),
-      trackColor: MaterialStateProperty.resolveWith(
-          (s) => s.contains(MaterialState.selected)
+      trackColor: WidgetStateProperty.resolveWith(
+          (s) => s.contains(WidgetState.selected)
               ? _greenMid
               : const Color(0xFF444444)),
     ),

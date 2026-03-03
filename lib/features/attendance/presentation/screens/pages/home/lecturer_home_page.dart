@@ -56,8 +56,10 @@ class _LecturerHomePageState extends State<LecturerHomePage>
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Scaffold(backgroundColor: Colors.white,
+    if (_loading) {
+      return const Scaffold(backgroundColor: Colors.white,
         body: Center(child: CircularProgressIndicator(color: _indigo)));
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
@@ -311,7 +313,7 @@ class _GenerateQrPageState extends State<_GenerateQrPage> {
               style: TextStyle(fontSize: 13, color: Colors.grey.shade500, height: 1.5)),
           const SizedBox(height: 20),
           DropdownButtonFormField<String>(
-            value: _selectedClass,
+            initialValue: _selectedClass,
             hint: const Text('Select class…'),
             decoration: InputDecoration(
               contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),

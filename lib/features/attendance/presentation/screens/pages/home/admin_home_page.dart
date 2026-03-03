@@ -56,8 +56,10 @@ class _AdminHomePageState extends State<AdminHomePage>
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Scaffold(backgroundColor: Colors.white,
+    if (_loading) {
+      return const Scaffold(backgroundColor: Colors.white,
         body: Center(child: CircularProgressIndicator(color: _teal)));
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),

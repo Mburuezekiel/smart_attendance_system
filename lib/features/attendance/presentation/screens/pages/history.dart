@@ -19,7 +19,7 @@ class _HistoryPageState extends State<HistoryPage>
 
   // ── Filters ─────────────────────────────────────────────────────────────────
   String _filterStatus = 'All';   // All / Present / Absent / Late
-  String _filterUnit   = 'All';   // All / per-unit
+  final String _filterUnit   = 'All';   // All / per-unit
   String _searchQuery  = '';
 
   // ── Role helpers ─────────────────────────────────────────────────────────────

@@ -915,8 +915,9 @@ class _BottomNav extends StatelessWidget {
         padding: const EdgeInsets.all(16),
         selectedIndex: 0,
         onTabChange: (index) {
-          if (index == 1) context.go('/history');
-          else if (index == 2) context.go('/timetable');
+          if (index == 1) {
+            context.go('/history');
+          } else if (index == 2) context.go('/timetable');
           else if (index == 3) context.go('/settings');
         },
         tabs: const [
