@@ -1,9 +1,3 @@
-// src/middleware/errorHandler.js
-// ─────────────────────────────────────────────────────────────────────────────
-// Express error-handling middleware MUST have exactly 4 parameters.
-// If you omit `next`, Express treats it as a regular middleware and
-// throws "next is not a function" when it tries to call the 4th arg.
-// ─────────────────────────────────────────────────────────────────────────────
 
 export const errorHandler = (err, req, res, next) => { // ← all 4 are required
   console.error(`[ERROR] ${req.method} ${req.path} →`, err.message);
