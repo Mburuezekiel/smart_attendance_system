@@ -1,24 +1,21 @@
 // src/app.js
 import express from 'express';
-import cors from 'cors';
 import authRoutes from './routes/authRoutes.js';
 import biometricRoutes from './routes/biometricRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
 const app = express();
 
-// ── CORS ───────────────────────────────────────────────────────────────────────
-// origin: true  reflects the incoming Origin back — allows all origins while
-// still honouring credentials: true.
-// DO NOT use the callback form of `origin` — it breaks in Express 5 / router v2
-// because the callback executes outside the middleware chain and `next` is lost.
-app.use(cors({
-  origin: true,                  // ← KEY FIX: no callback, just true
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization','Accept','Origin'],
-  credentials: true,
-  maxAge: 600,
-}));
+// ── Manual CORS (replaces cors package — incompatible with Express 5) ─────────
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 // ── Body parser ────────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }));
@@ -32,7 +29,7 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/biometric', biometricRoutes);
 
-// ── Error handler (4 params — must be last) ────────────────────────────────────
+// ── Error handler ──────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
 export default app;
