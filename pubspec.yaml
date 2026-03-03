@@ -50,6 +50,7 @@ dependencies:
   local_auth_ios: ^1.0.0
   http: ^1.2.1
  
+ 
   
 
 dev_dependencies:

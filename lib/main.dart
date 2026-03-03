@@ -1,3 +1,5 @@
+// lib/main.dart
+
 import 'package:flutter/material.dart';
 import 'core/app_router.dart';
 import 'core/theme/theme_controller.dart';
@@ -11,29 +13,17 @@ Future<void> main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: ThemeController.instance.themeMode,
-      builder: (context, mode, _) {
+      builder: (_, mode, __) {
         return MaterialApp.router(
           title: 'EduTrack MUT',
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF19207D),
-              brightness: Brightness.light,
-            ),
-            useMaterial3: true,
-          ),
-          darkTheme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF19207D),
-              brightness: Brightness.dark,
-            ),
-            useMaterial3: true,
-          ),
-          themeMode: mode,
+          debugShowCheckedModeBanner: false,
+          theme:      AppTheme.light,   // ← full design system (green, cards, inputs…)
+          darkTheme:  AppTheme.dark,    // ← full dark variant
+          themeMode:  mode,             // ← live-switches when user toggles in Settings
           routerConfig: appRouter,
         );
       },
