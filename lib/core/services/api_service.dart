@@ -34,7 +34,7 @@ class ApiService {
   static const String _lanIp = '192.168.1.5';
 
   static String get baseUrl {
-    if (kIsWeb) return 'http://localhost:5000';
+    if (kIsWeb) return 'https://smart-attendance-system-necx.onrender.com';
     return 'http://10.0.2.2:5000';
     // return 'http://localhost:5000';      // iOS simulator
     // return 'http://$_lanIp:5000';        // physical device
