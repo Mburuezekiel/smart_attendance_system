@@ -1,4 +1,3 @@
-// lib/core/services/api_service.dart
 
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
@@ -35,10 +34,12 @@ class ApiService {
 
   static String get baseUrl {
     if (kIsWeb) return 'https://smart-attendance-system-necx.onrender.com';
-    return 'http://10.0.2.2:5000';
+    return 'https://smart-attendance-system-necx.onrender.com';
     // return 'http://localhost:5000';      // iOS simulator
     // return 'http://$_lanIp:5000';        // physical device
+    //http://10.0.2.2:5000
   }
+
 
   // ── SharedPreferences keys ──────────────────────────────────────────────────
   static const String _tokenKey = 'auth_token';
