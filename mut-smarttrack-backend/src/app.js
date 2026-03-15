@@ -3,6 +3,7 @@ import express from 'express';
 import authRoutes from './routes/authRoutes.js';
 import biometricRoutes from './routes/biometricRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import userRoutes from './routes/userRoutes.js';  
 
 const app = express();
 
@@ -28,6 +29,8 @@ app.get('/api/health', (_req, res) => {
 // ── Routes ─────────────────────────────────────────────────────────────────────
 app.use('/api/auth', authRoutes);
 app.use('/api/biometric', biometricRoutes);
+app.use('/api/users', userRoutes); 
+
 
 // ── Error handler ──────────────────────────────────────────────────────────────
 app.use(errorHandler);
