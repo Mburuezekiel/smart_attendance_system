@@ -4,6 +4,9 @@ import authRoutes from './routes/authRoutes.js';
 import biometricRoutes from './routes/biometricRoutes.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import userRoutes from './routes/userRoutes.js';  
+import unitRoutes       from './routes/unitRoutes.js';
+import assignmentRoutes from './routes/assignmentRoutes.js';
+import sessionRoutes    from './routes/sessionRoutes.js';
 
 const app = express();
 
@@ -30,6 +33,11 @@ app.get('/api/health', (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/biometric', biometricRoutes);
 app.use('/api/users', userRoutes); 
+ 
+app.use('/api/units',       unitRoutes);
+app.use('/api/assignments', assignmentRoutes);
+app.use('/api/sessions',    sessionRoutes);
+ 
 
 
 // ── Error handler ──────────────────────────────────────────────────────────────

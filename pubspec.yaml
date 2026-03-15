@@ -43,13 +43,16 @@ dependencies:
   firebase_core: ^4.5.0
   firebase_auth: ^6.2.0  
   qr_flutter: ^4.1.0
-  mobile_scanner: ^7.1.4
   shared_preferences: ^2.3.2
-  local_auth: ^3.0.1
   local_auth_android: ^2.0.5
   local_auth_ios: ^1.0.0
   http: ^1.2.1
- 
+  mobile_scanner: ^5.2.3
+  local_auth: ^3.0.1
+  google_mlkit_face_detection: ^0.11.0
+  camera: ^0.11.0
+  crypto: ^3.0.3
+
  
   
 

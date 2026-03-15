@@ -218,12 +218,6 @@ class ApiService {
   }
 
   // ── GET (generic) ───────────────────────────────────────────────────────────
-  // Used by dashboards to fetch stats and user lists.
-  //
-  // Examples:
-  //   final result = await ApiService().get('/users');
-  //   final result = await ApiService().get('/users', queryParams: {'role': 'student', 'page': '1'});
-  //   final result = await ApiService().get('/users/dashboard-stats');
 
   Future<ApiResult<Map<String, dynamic>>> get(
     String path, {
@@ -234,11 +228,9 @@ class ApiService {
       if (queryParams != null && queryParams.isNotEmpty) {
         uri = uri.replace(queryParameters: queryParams);
       }
-
       final res = await http
           .get(uri, headers: await _authHeaders)
           .timeout(const Duration(seconds: 15));
-
       return _handle(res);
     } on Exception catch (e) {
       return ApiResult.err(_friendlyError(e));
@@ -246,10 +238,6 @@ class ApiService {
   }
 
   // ── DELETE (generic) ────────────────────────────────────────────────────────
-  // Included for completeness — useful for admin user deletion.
-  //
-  // Example:
-  //   final result = await ApiService().delete('/users/$id');
 
   Future<ApiResult<Map<String, dynamic>>> delete(String path) async {
     try {
@@ -264,10 +252,6 @@ class ApiService {
   }
 
   // ── PATCH (generic) ─────────────────────────────────────────────────────────
-  // Useful for admin updating a user's role or profile.
-  //
-  // Example:
-  //   final result = await ApiService().patch('/users/$id', {'role': 'lecturer'});
 
   Future<ApiResult<Map<String, dynamic>>> patch(
     String path,
@@ -283,4 +267,136 @@ class ApiService {
       return ApiResult.err(_friendlyError(e));
     }
   }
-}
+
+  // ── POST (generic) ──────────────────────────────────────────────────────────
+
+  Future<ApiResult<Map<String, dynamic>>> post(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    try {
+      final uri = Uri.parse('$baseUrl/api$path');
+      final res = await http
+          .post(uri, headers: await _authHeaders, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 15));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── POST /api/units ─────────────────────────────────────────────────────────
+
+  Future<ApiResult<Map<String, dynamic>>> createUnit({
+    required String code,
+    required String name,
+    required String department,
+    required int    year,
+    required int    semester,
+    String description = '',
+  }) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$baseUrl/api/units'),
+            headers: await _authHeaders,
+            body: jsonEncode({
+              'code':        code,
+              'name':        name,
+              'department':  department,
+              'year':        year,
+              'semester':    semester,
+              'description': description,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── POST /api/assignments ───────────────────────────────────────────────────
+
+  Future<ApiResult<Map<String, dynamic>>> createAssignment({
+    required String      unitId,
+    required String      lecturerId,
+    required String      academicYear,
+    required int         semester,
+    List<String>         studentIds = const [],
+  }) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$baseUrl/api/assignments'),
+            headers: await _authHeaders,
+            body: jsonEncode({
+              'unitId':       unitId,
+              'lecturerId':   lecturerId,
+              'academicYear': academicYear,
+              'semester':     semester,
+              'studentIds':   studentIds,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── POST /api/sessions ──────────────────────────────────────────────────────
+
+  Future<ApiResult<Map<String, dynamic>>> createSession({
+    required String assignmentId,
+    int    durationMinutes = 15,
+    String location        = '',
+  }) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$baseUrl/api/sessions'),
+            headers: await _authHeaders,
+            body: jsonEncode({
+              'assignmentId':   assignmentId,
+              'durationMinutes': durationMinutes,
+              'location':       location,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── POST /api/attendance ────────────────────────────────────────────────────
+
+  Future<ApiResult<Map<String, dynamic>>> markAttendance({
+    required String sessionToken,
+    required bool   biometricVerified,
+    required bool   faceVerified,
+    required String digitalSignature,
+    required String signedAt,
+  }) async {
+    try {
+      final res = await http
+          .post(
+            Uri.parse('$baseUrl/api/attendance'),
+            headers: await _authHeaders,
+            body: jsonEncode({
+              'sessionToken':      sessionToken,
+              'biometricVerified': biometricVerified,
+              'faceVerified':      faceVerified,
+              'digitalSignature':  digitalSignature,
+              'signedAt':          signedAt,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+} // ← END OF ApiService class
