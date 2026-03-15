@@ -1,4 +1,3 @@
-
 import 'dart:convert';
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:http/http.dart' as http;
@@ -27,19 +26,15 @@ class ApiService {
   factory ApiService() => _instance;
 
   // ── Base URL ────────────────────────────────────────────────────────────────
-  // Flutter Web            → localhost:5000
-  // Android emulator       → 10.0.2.2:5000
-  // Physical device / LAN  → change _lanIp below
   static const String _lanIp = '192.168.1.5';
 
   static String get baseUrl {
     if (kIsWeb) return 'https://smart-attendance-system-necx.onrender.com';
     return 'https://smart-attendance-system-necx.onrender.com';
-    // return 'http://localhost:5000';      // iOS simulator
-    // return 'http://$_lanIp:5000';        // physical device
-    //http://10.0.2.2:5000
+    // return 'http://localhost:5000';
+    // return 'http://$_lanIp:5000';
+    // return 'http://10.0.2.2:5000';
   }
-
 
   // ── SharedPreferences keys ──────────────────────────────────────────────────
   static const String _tokenKey = 'auth_token';
@@ -87,7 +82,6 @@ class ApiService {
 
   // ── Internal helpers ────────────────────────────────────────────────────────
 
-  /// Decodes the response and returns an [ApiResult].
   ApiResult<Map<String, dynamic>> _handle(http.Response res) {
     debugPrint('[API] ${res.request?.method} ${res.request?.url} → ${res.statusCode}');
     try {
@@ -109,12 +103,8 @@ class ApiService {
         s.contains('Failed host lookup')) {
       return 'Cannot reach server. Is it running on port 5000?';
     }
-    if (s.contains('TimeoutException')) {
-      return 'Request timed out. Check your server.';
-    }
-    if (s.contains('XMLHttpRequest') || s.contains('CORS')) {
-      return 'CORS error. Check server configuration.';
-    }
+    if (s.contains('TimeoutException')) return 'Request timed out. Check your server.';
+    if (s.contains('XMLHttpRequest') || s.contains('CORS')) return 'CORS error. Check server configuration.';
     return 'Unexpected error: $s';
   }
 
@@ -137,7 +127,7 @@ class ApiService {
               'registrationNumber': registrationNumber,
               'email':              email,
               'password':           password,
-              'role':               role,         // ← always included
+              'role':               role,
             }),
           )
           .timeout(const Duration(seconds: 15));
@@ -221,6 +211,73 @@ class ApiService {
             }),
           )
           .timeout(const Duration(seconds: 20));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── GET (generic) ───────────────────────────────────────────────────────────
+  // Used by dashboards to fetch stats and user lists.
+  //
+  // Examples:
+  //   final result = await ApiService().get('/users');
+  //   final result = await ApiService().get('/users', queryParams: {'role': 'student', 'page': '1'});
+  //   final result = await ApiService().get('/users/dashboard-stats');
+
+  Future<ApiResult<Map<String, dynamic>>> get(
+    String path, {
+    Map<String, String>? queryParams,
+  }) async {
+    try {
+      var uri = Uri.parse('$baseUrl/api$path');
+      if (queryParams != null && queryParams.isNotEmpty) {
+        uri = uri.replace(queryParameters: queryParams);
+      }
+
+      final res = await http
+          .get(uri, headers: await _authHeaders)
+          .timeout(const Duration(seconds: 15));
+
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── DELETE (generic) ────────────────────────────────────────────────────────
+  // Included for completeness — useful for admin user deletion.
+  //
+  // Example:
+  //   final result = await ApiService().delete('/users/$id');
+
+  Future<ApiResult<Map<String, dynamic>>> delete(String path) async {
+    try {
+      final uri = Uri.parse('$baseUrl/api$path');
+      final res = await http
+          .delete(uri, headers: await _authHeaders)
+          .timeout(const Duration(seconds: 15));
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+
+  // ── PATCH (generic) ─────────────────────────────────────────────────────────
+  // Useful for admin updating a user's role or profile.
+  //
+  // Example:
+  //   final result = await ApiService().patch('/users/$id', {'role': 'lecturer'});
+
+  Future<ApiResult<Map<String, dynamic>>> patch(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    try {
+      final uri = Uri.parse('$baseUrl/api$path');
+      final res = await http
+          .patch(uri, headers: await _authHeaders, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 15));
       return _handle(res);
     } on Exception catch (e) {
       return ApiResult.err(_friendlyError(e));
