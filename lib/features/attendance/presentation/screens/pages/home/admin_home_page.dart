@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_nav_bar/google_nav_bar.dart';
 import '../../../../../../core/services/api_service.dart';
+// The assignments page lives one level up in features/assignments/presentation/
+import '../../admin/admin_assignments_page.dart';
 
 class AdminHomePage extends StatefulWidget {
   const AdminHomePage({super.key});
@@ -37,10 +39,8 @@ class _AdminHomePageState extends State<AdminHomePage>
   void dispose() { _fadeCtrl.dispose(); _slideCtrl.dispose(); super.dispose(); }
 
   Future<void> _loadData() async {
-    // Sequential calls — avoids Future.wait generic type issues
     final user        = await ApiService().getUser();
     final statsResult = await ApiService().get('/users/dashboard-stats');
-
     if (!mounted) return;
     _user = user;
     if (statsResult.success) _dashboardStats = statsResult.data;
@@ -55,6 +55,8 @@ class _AdminHomePageState extends State<AdminHomePage>
         getFirstName: () => _firstName, getStats: () => _dashboardStats,
       ),
       const _ManageUsersPage(),
+      // Tab 2 — Admin assigns lecturers → units → students
+      const AdminAssignmentsPage(),
     ];
     if (mounted) setState(() {});
   }
@@ -79,7 +81,8 @@ class _AdminHomePageState extends State<AdminHomePage>
       bottomNavigationBar: _AdminBottomNav(
         selectedIndex: _selectedIndex,
         onTabChange: (i) {
-          if (i == 2) { context.go('/history');       return; }
+          // Tabs 0, 1, 2 are embedded pages
+          // Tabs 3, 4 navigate via GoRouter
           if (i == 3) { context.go('/notifications'); return; }
           if (i == 4) { context.go('/settings');      return; }
           setState(() => _selectedIndex = i);
@@ -90,7 +93,7 @@ class _AdminHomePageState extends State<AdminHomePage>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// BOTTOM NAV
+// BOTTOM NAV  — 5 tabs, tab 2 is now Assignments
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _AdminBottomNav extends StatelessWidget {
@@ -111,11 +114,11 @@ class _AdminBottomNav extends StatelessWidget {
         gap: 8, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         selectedIndex: selectedIndex, onTabChange: onTabChange,
         tabs: const [
-          GButton(icon: Icons.dashboard_rounded,            text: 'Dashboard'),
-          GButton(icon: Icons.manage_accounts_rounded,      text: 'Users'),
-          GButton(icon: Icons.summarize_rounded,            text: 'Reports'),
+          GButton(icon: Icons.dashboard_rounded,        text: 'Dashboard'),
+          GButton(icon: Icons.manage_accounts_rounded,  text: 'Users'),
+          GButton(icon: Icons.assignment_rounded,       text: 'Assign'),   // ← NEW
           GButton(icon: Icons.notifications_active_rounded, text: 'Alerts'),
-          GButton(icon: Icons.settings_rounded,             text: 'Settings'),
+          GButton(icon: Icons.settings_rounded,         text: 'Settings'),
         ],
       ),
     );
@@ -359,7 +362,7 @@ class _AdminHomeBody extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MANAGE USERS PAGE
+// MANAGE USERS PAGE  (tab 1)
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _ManageUsersPage extends StatefulWidget {
@@ -436,8 +439,7 @@ class _ManageUsersPageState extends State<_ManageUsersPage> {
                 hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade400),
                 prefixIcon: Icon(Icons.search_rounded, color: Colors.grey.shade400, size: 20),
                 suffixIcon: _search.isNotEmpty
-                    ? IconButton(
-                        icon: Icon(Icons.clear_rounded, size: 18, color: Colors.grey.shade400),
+                    ? IconButton(icon: Icon(Icons.clear_rounded, size: 18, color: Colors.grey.shade400),
                         onPressed: () { _searchCtrl.clear(); _onSearch(''); })
                     : null,
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
