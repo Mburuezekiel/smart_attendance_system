@@ -1,7 +1,7 @@
 // lib/features/assignments/presentation/admin_assignments_page.dart
 
 import 'package:flutter/material.dart';
-import '../../../../../core/services/api_service.dart';
+import '../../../core/services/api_service.dart';
 
 class AdminAssignmentsPage extends StatefulWidget {
   const AdminAssignmentsPage({super.key});
@@ -24,7 +24,7 @@ class _AdminAssignmentsPageState extends State<AdminAssignmentsPage>
   @override
   void initState() {
     super.initState();
-    _tabCtrl = TabController(length: 2, vsync: this);
+    _tabCtrl = TabController(length: 3, vsync: this);
     _loadAll();
   }
 
@@ -76,8 +76,9 @@ class _AdminAssignmentsPageState extends State<AdminAssignmentsPage>
           labelColor: Colors.white,
           unselectedLabelColor: Colors.white60,
           tabs: const [
-            Tab(icon: Icon(Icons.list_alt_rounded),  text: 'All'),
-            Tab(icon: Icon(Icons.add_box_rounded),   text: 'New'),
+            Tab(icon: Icon(Icons.list_alt_rounded),   text: 'All'),
+            Tab(icon: Icon(Icons.add_box_rounded),    text: 'New'),
+            Tab(icon: Icon(Icons.menu_book_rounded),  text: 'Units'),
           ],
         ),
       ),
@@ -107,6 +108,10 @@ class _AdminAssignmentsPageState extends State<AdminAssignmentsPage>
                       lecturers: _lecturers,
                       students: _students,
                       onCreated: () { _loadAll(); _tabCtrl.animateTo(0); },
+                    ),
+                    _UnitsTab(
+                      units: _units,
+                      onRefresh: _loadAll,
                     ),
                   ],
                 ),
@@ -695,5 +700,294 @@ class _FormLabel extends StatelessWidget {
   @override Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 6),
     child: Text(text, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF1B1B1B))),
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNITS TAB  — list existing units + create new ones
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _UnitsTab extends StatefulWidget {
+  final List<Map<String, dynamic>> units;
+  final VoidCallback onRefresh;
+  const _UnitsTab({required this.units, required this.onRefresh});
+  @override State<_UnitsTab> createState() => _UnitsTabState();
+}
+
+class _UnitsTabState extends State<_UnitsTab> {
+  static const _teal = Color(0xFF00695C);
+  bool _showForm = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F6F8),
+      floatingActionButton: FloatingActionButton.extended(
+        backgroundColor: _teal,
+        icon: const Icon(Icons.add_rounded, color: Colors.white),
+        label: Text(_showForm ? 'Cancel' : 'New Unit',
+            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+        onPressed: () => setState(() => _showForm = !_showForm),
+      ),
+      body: _showForm
+          ? _CreateUnitForm(onCreated: () {
+              setState(() => _showForm = false);
+              widget.onRefresh();
+            })
+          : _UnitList(units: widget.units, onRefresh: widget.onRefresh),
+    );
+  }
+}
+
+// ── Unit list ─────────────────────────────────────────────────────────────────
+
+class _UnitList extends StatelessWidget {
+  final List<Map<String, dynamic>> units;
+  final VoidCallback onRefresh;
+  static const _teal = Color(0xFF00695C);
+
+  const _UnitList({required this.units, required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context) {
+    if (units.isEmpty) {
+      return Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.menu_book_outlined, size: 56, color: Colors.grey.shade300),
+        const SizedBox(height: 12),
+        Text('No units yet', style: TextStyle(color: Colors.grey.shade400, fontSize: 14)),
+        const SizedBox(height: 4),
+        Text('Tap + New Unit to create one',
+            style: TextStyle(color: Colors.grey.shade300, fontSize: 12)),
+      ]));
+    }
+    return RefreshIndicator(
+      color: _teal,
+      onRefresh: () async => onRefresh(),
+      child: ListView.separated(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        itemCount: units.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (ctx, i) {
+          final u = units[i];
+          return Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white, borderRadius: BorderRadius.circular(14),
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04),
+                  blurRadius: 8, offset: const Offset(0, 2))],
+            ),
+            child: Row(children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                    color: _teal.withOpacity(0.08), borderRadius: BorderRadius.circular(10)),
+                child: const Icon(Icons.menu_book_rounded, color: _teal, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(u['name'] as String? ?? '—',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Text('${u['code']} · ${u['department']}',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+              ])),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                    color: _teal.withOpacity(0.08), borderRadius: BorderRadius.circular(6)),
+                child: Text('Yr ${u['year']} · Sem ${u['semester']}',
+                    style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _teal)),
+              ),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ── Create unit form ─────────────────────────────────────────────────────────
+
+class _CreateUnitForm extends StatefulWidget {
+  final VoidCallback onCreated;
+  const _CreateUnitForm({required this.onCreated});
+  @override State<_CreateUnitForm> createState() => _CreateUnitFormState();
+}
+
+class _CreateUnitFormState extends State<_CreateUnitForm> {
+  static const _teal = Color(0xFF00695C);
+
+  final _codeCtrl = TextEditingController();
+  final _nameCtrl = TextEditingController();
+  final _deptCtrl = TextEditingController();
+  int   _year     = 1;
+  int   _semester = 1;
+  bool  _saving   = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _codeCtrl.dispose(); _nameCtrl.dispose(); _deptCtrl.dispose(); super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final code = _codeCtrl.text.trim().toUpperCase();
+    final name = _nameCtrl.text.trim();
+    final dept = _deptCtrl.text.trim();
+
+    if (code.isEmpty || name.isEmpty || dept.isEmpty) {
+      setState(() => _error = 'Code, name and department are all required.'); return;
+    }
+    setState(() { _saving = true; _error = null; });
+
+    final result = await ApiService().post('/units', {
+      'code': code, 'name': name, 'department': dept,
+      'year': _year, 'semester': _semester,
+    });
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+
+    if (result.success) {
+      widget.onCreated();
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unit created!'), backgroundColor: _teal));
+    } else {
+      setState(() => _error = result.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+
+        // Header card
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: _teal.withOpacity(0.06), borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: _teal.withOpacity(0.2)),
+          ),
+          child: Row(children: [
+            const Icon(Icons.menu_book_rounded, color: _teal, size: 22),
+            const SizedBox(width: 10),
+            const Expanded(child: Text('Create New Unit',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800, color: _teal))),
+          ]),
+        ),
+        const SizedBox(height: 20),
+
+        const _FormLabel('Unit Code'),
+        _Field(hint: 'e.g. CS301', ctrl: _codeCtrl, caps: true),
+        const SizedBox(height: 14),
+
+        const _FormLabel('Unit Name'),
+        _Field(hint: 'e.g. Computer Networks', ctrl: _nameCtrl),
+        const SizedBox(height: 14),
+
+        const _FormLabel('Department'),
+        _Field(hint: 'e.g. Computer Science', ctrl: _deptCtrl),
+        const SizedBox(height: 14),
+
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Year picker
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const _FormLabel('Year'),
+            DropdownButtonFormField<int>(
+              value: _year,
+              decoration: _dropDecor(),
+              items: List.generate(6, (i) => DropdownMenuItem(
+                  value: i + 1, child: Text('Year ${i + 1}'))),
+              onChanged: (v) => setState(() => _year = v!),
+            ),
+          ])),
+          const SizedBox(width: 12),
+          // Semester toggle
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const _FormLabel('Semester'),
+            Row(children: [1, 2].map((s) => Padding(
+              padding: EdgeInsets.only(right: s == 1 ? 8 : 0),
+              child: GestureDetector(
+                onTap: () => setState(() => _semester = s),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 68, height: 50,
+                  decoration: BoxDecoration(
+                    color: _semester == s ? _teal : const Color(0xFFF7F7F7),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: _semester == s ? _teal : Colors.grey.shade200),
+                  ),
+                  child: Center(child: Text('Sem $s', style: TextStyle(
+                      fontSize: 13, fontWeight: FontWeight.w700,
+                      color: _semester == s ? Colors.white : Colors.grey.shade600))),
+                ),
+              ),
+            )).toList()),
+          ]),
+        ]),
+
+        if (_error != null) ...[
+          const SizedBox(height: 14),
+          Container(padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: const Color(0xFFFFEBEE),
+                borderRadius: BorderRadius.circular(10)),
+            child: Text(_error!, style: const TextStyle(fontSize: 12, color: Color(0xFFE53935)))),
+        ],
+        const SizedBox(height: 24),
+
+        GestureDetector(
+          onTap: _saving ? null : _submit,
+          child: Container(
+            height: 52,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(colors: [_teal, Color(0xFF00796B)]),
+              borderRadius: BorderRadius.circular(14),
+              boxShadow: [BoxShadow(color: _teal.withOpacity(0.3), blurRadius: 12, offset: const Offset(0, 4))],
+            ),
+            child: Center(child: _saving
+                ? const CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
+                : const Text('Create Unit',
+                    style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700))),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  InputDecoration _dropDecor() => InputDecoration(
+    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    filled: true, fillColor: const Color(0xFFF7F7F7),
+    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: Colors.grey.shade200)),
+    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide(color: Colors.grey.shade200)),
+    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: _teal, width: 2)),
+  );
+}
+
+class _Field extends StatelessWidget {
+  final String hint;
+  final TextEditingController ctrl;
+  final bool caps;
+  static const _teal = Color(0xFF00695C);
+  const _Field({required this.hint, required this.ctrl, this.caps = false});
+  @override Widget build(BuildContext context) => TextField(
+    controller: ctrl,
+    textCapitalization: caps ? TextCapitalization.characters : TextCapitalization.words,
+    decoration: InputDecoration(
+      hintText: hint,
+      hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade400),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      filled: true, fillColor: const Color(0xFFF7F7F7),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.grey.shade200)),
+      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide(color: Colors.grey.shade200)),
+      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: _teal, width: 2)),
+    ),
   );
 }
