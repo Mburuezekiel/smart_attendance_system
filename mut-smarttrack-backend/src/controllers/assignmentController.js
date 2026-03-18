@@ -7,14 +7,15 @@ import User       from '../models/User.js';
 // ── GET /api/assignments ───────────────────────────────────────────────────────
 export const getAssignments = async (req, res) => {
   try {
-    const { role, _id } = req.user;
+    const role   = req.user.role;
+const userId = req.user._id ?? req.user.id; 
     let filter = {};
 
     if (role === 'lecturer') {
       // Cast to ObjectId — string comparison against ObjectId field returns 0 results
-      filter.lecturer = new mongoose.Types.ObjectId(_id);
+      filter.lecturer = new mongoose.Types.ObjectId(userId);
     } else if (role === 'student') {
-      filter.students = new mongoose.Types.ObjectId(_id);
+      filter.students = new mongoose.Types.ObjectId(userId);
     }
     // admin: no filter — gets all
 

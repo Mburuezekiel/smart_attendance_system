@@ -33,7 +33,7 @@ export const signup = async (req, res, next) => {
       message: 'Account created successfully',
       token,
       user: {
-        id: user._id,
+        _id: user._id,
         fullName: user.fullName,
         email: user.email,
         role: user.role,
@@ -72,7 +72,7 @@ export const login = async (req, res, next) => {
       message: 'Login successful',
       token,
       user: {
-        id: user._id,
+        _id: user._id,
         fullName: user.fullName,
         email: user.email,
         role: user.role,
