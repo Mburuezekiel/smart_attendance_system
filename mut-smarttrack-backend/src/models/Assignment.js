@@ -1,22 +1,20 @@
 // models/Assignment.js
 import mongoose from 'mongoose';
 
-// One document per lecturer+unit pair.
-// The students array holds all students enrolled in that unit under that lecturer.
 const assignmentSchema = new mongoose.Schema({
-  unit:     { type: mongoose.Schema.Types.ObjectId, ref: 'Unit',    required: true },
-  lecturer: { type: mongoose.Schema.Types.ObjectId, ref: 'User',    required: true },
+  unit:     { type: mongoose.Schema.Types.ObjectId, ref: 'Unit',  required: true },
+  lecturer: { type: mongoose.Schema.Types.ObjectId, ref: 'User',  required: true },
   students: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  room:     { type: String, trim: true },                          // e.g. "LH-3"
-  schedule: [{                                                     // weekly schedule
-    day:       { type: String, enum: ['Mon','Tue','Wed','Thu','Fri','Sat'] },
-    startTime: { type: String },   // "08:00"
-    endTime:   { type: String },   // "10:00"
-  }],
-  isActive: { type: Boolean, default: true },
+  room:     { type: String, default: '' },
+  schedule: { type: Array,  default: [] },
+  // academicYear and semester are optional — not enforced at DB level
+  academicYear: { type: String, default: '' },
+  semester:     { type: Number, default: 1 },
+  isActive:     { type: Boolean, default: true },
 }, { timestamps: true });
 
-// One lecturer can only be assigned a unit once
+// Simple index — just prevent exact duplicate (same unit + lecturer only)
+// Remove the academicYear/semester compound index that was blocking saves
 assignmentSchema.index({ unit: 1, lecturer: 1 }, { unique: true });
 
 export default mongoose.model('Assignment', assignmentSchema);
