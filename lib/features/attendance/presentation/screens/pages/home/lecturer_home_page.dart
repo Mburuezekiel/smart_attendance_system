@@ -1,12 +1,11 @@
 // lib/features/home/presentation/lecturer_home_page.dart
 
-import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_nav_bar/google_nav_bar.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 import '../../../../../../core/services/api_service.dart';
+// ← Import the standalone QR page instead of embedding it
+import '../../lecturer/lecturer_qr_page.dart';
 
 class LecturerHomePage extends StatefulWidget {
   const LecturerHomePage({super.key});
@@ -39,10 +38,8 @@ class _LecturerHomePageState extends State<LecturerHomePage>
   void dispose() { _fadeCtrl.dispose(); _slideCtrl.dispose(); super.dispose(); }
 
   Future<void> _loadData() async {
-    // Sequential calls — avoids Future.wait generic cast issues
     final user        = await ApiService().getUser();
     final statsResult = await ApiService().get('/users/lecturer-stats');
-
     if (!mounted) return;
     _user = user;
     if (statsResult.success) _dashboardStats = statsResult.data;
@@ -56,7 +53,7 @@ class _LecturerHomePageState extends State<LecturerHomePage>
         fadeCtrl: _fadeCtrl, slideCtrl: _slideCtrl,
         getFirstName: () => _firstName, getStats: () => _dashboardStats,
       ),
-      const _GenerateQrPage(),   // real QR with session API
+      const LecturerQrPage(),   // ← standalone imported page
     ];
     if (mounted) setState(() {});
   }
@@ -433,330 +430,7 @@ class _LecStudentTeaserState extends State<_LecStudentTeaser> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GENERATE QR PAGE  — real session API + live QR + polling
-// ─────────────────────────────────────────────────────────────────────────────
-
-class _GenerateQrPage extends StatefulWidget {
-  const _GenerateQrPage();
-  @override State<_GenerateQrPage> createState() => _GenerateQrPageState();
-}
-
-class _GenerateQrPageState extends State<_GenerateQrPage> {
-  static const _indigo = Color(0xFF283593);
-
-  List<Map<String, dynamic>> _assignments      = [];
-  Map<String, dynamic>?      _selAssignment;
-  Map<String, dynamic>?      _activeSession;
-
-  bool    _loadingAssignments = true;
-  bool    _creatingSession    = false;
-  String? _error;
-
-  int    _scanned = 0;
-  int    _total   = 0;
-  Timer? _pollTimer;
-
-  @override void initState() { super.initState(); _loadAssignments(); }
-  @override void dispose()   { _pollTimer?.cancel(); super.dispose(); }
-
-  Future<void> _loadAssignments() async {
-    setState(() => _loadingAssignments = true);
-    final r = await ApiService().get('/assignments');
-    if (!mounted) return;
-    if (r.success) {
-      setState(() {
-        _assignments        = List<Map<String, dynamic>>.from(r.data?['assignments'] ?? []);
-        _loadingAssignments = false;
-      });
-    } else {
-      setState(() { _error = r.error; _loadingAssignments = false; });
-    }
-  }
-
-  Future<void> _generateQr() async {
-    if (_selAssignment == null) return;
-    setState(() { _creatingSession = true; _error = null; });
-
-    final r = await ApiService().createSession(
-      assignmentId:    _selAssignment!['_id'] as String,
-      durationMinutes: 15,
-    );
-    if (!mounted) return;
-    if (r.success) {
-      setState(() {
-        _activeSession   = r.data;
-        _creatingSession = false;
-        _total           = (_selAssignment!['students'] as List? ?? []).length;
-        _scanned         = 0;
-      });
-      _startPolling();
-    } else {
-      setState(() { _error = r.error; _creatingSession = false; });
-    }
-  }
-
-  void _startPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) => _pollStats());
-  }
-
-  Future<void> _pollStats() async {
-    final sessionId = _activeSession?['_id'] as String?;
-    if (sessionId == null) return;
-    final r = await ApiService().get('/sessions/$sessionId/stats');
-    if (!mounted) return;
-    if (r.success) {
-      setState(() {
-        _scanned = r.data?['scanned'] ?? _scanned;
-        _total   = r.data?['total']   ?? _total;
-        if (r.data?['isActive'] == false) _endSession(fromServer: true);
-      });
-    }
-  }
-
-  Future<void> _endSession({ bool fromServer = false }) async {
-    _pollTimer?.cancel();
-    if (!fromServer) {
-      final sessionId = _activeSession?['_id'] as String?;
-      if (sessionId != null) await ApiService().delete('/sessions/$sessionId');
-    }
-    if (mounted) setState(() { _activeSession = null; _selAssignment = null; _scanned = 0; _total = 0; });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF4F6F8),
-      appBar: AppBar(
-        backgroundColor: _indigo, automaticallyImplyLeading: false,
-        title: const Text('Generate QR Code',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w800)),
-        actions: [
-          if (_activeSession != null)
-            TextButton.icon(
-              onPressed: _endSession,
-              icon: const Icon(Icons.stop_circle_rounded, color: Colors.white70, size: 18),
-              label: const Text('End', style: TextStyle(color: Colors.white70, fontWeight: FontWeight.w700)),
-            ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: _loadingAssignments
-            ? const Center(child: CircularProgressIndicator(color: _indigo))
-            : _activeSession != null
-                ? _buildActiveSession()
-                : _buildSetup(),
-      ),
-    );
-  }
-
-  Widget _buildSetup() => Column(
-    mainAxisAlignment: MainAxisAlignment.center,
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Container(
-        padding: const EdgeInsets.all(24),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
-            boxShadow: [BoxShadow(color: _indigo.withOpacity(0.08), blurRadius: 24, offset: const Offset(0, 8))]),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Icon(Icons.qr_code_rounded, color: _indigo, size: 32),
-          const SizedBox(height: 12),
-          const Text('Start Attendance Session',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1B1B1B))),
-          const SizedBox(height: 4),
-          Text('Select one of your assigned units',
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade500, height: 1.5)),
-          const SizedBox(height: 20),
-
-          if (_error != null) ...[
-            Container(padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: const Color(0xFFFFEBEE), borderRadius: BorderRadius.circular(8)),
-                child: Text(_error!, style: const TextStyle(color: Color(0xFFE53935), fontSize: 12))),
-            const SizedBox(height: 14),
-          ],
-
-          if (_assignments.isEmpty)
-            Container(padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(color: const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(12)),
-              child: const Row(children: [
-                Icon(Icons.info_outline_rounded, color: Color(0xFF283593), size: 18),
-                SizedBox(width: 10),
-                Expanded(child: Text('No units assigned yet. Ask your admin to create an assignment.',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF555555)))),
-              ]))
-          else ...[
-            ...List.generate(_assignments.length, (i) {
-              final a    = _assignments[i];
-              final unit = a['unit'] as Map<String, dynamic>? ?? {};
-              final sel  = _selAssignment?['_id'] == a['_id'];
-              return GestureDetector(
-                onTap: () => setState(() => _selAssignment = a),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: sel ? _indigo.withOpacity(0.06) : const Color(0xFFF7F7F7),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: sel ? _indigo : Colors.transparent, width: 1.5),
-                  ),
-                  child: Row(children: [
-                    Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(color: _indigo, borderRadius: BorderRadius.circular(6)),
-                      child: Text(unit['code'] as String? ?? '—',
-                          style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800))),
-                    const SizedBox(width: 10),
-                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text(unit['name'] as String? ?? '—',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
-                      Text('${(a['students'] as List? ?? []).length} students enrolled',
-                          style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
-                    ])),
-                    if (sel) const Icon(Icons.check_circle_rounded, color: _indigo, size: 20),
-                  ]),
-                ),
-              );
-            }),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(color: const Color(0xFFE8EAF6), borderRadius: BorderRadius.circular(10)),
-              child: Row(mainAxisSize: MainAxisSize.min, children: const [
-                Icon(Icons.timer_outlined, color: _indigo, size: 14),
-                SizedBox(width: 6),
-                Text('QR code expires in 15 minutes',
-                    style: TextStyle(fontSize: 11, color: _indigo, fontWeight: FontWeight.w600)),
-              ]),
-            ),
-            const SizedBox(height: 20),
-            GestureDetector(
-              onTap: (_selAssignment == null || _creatingSession) ? null : _generateQr,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200), height: 52,
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(colors: _selAssignment == null
-                      ? [Colors.grey.shade300, Colors.grey.shade400]
-                      : [_indigo, const Color(0xFF3949AB)]),
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: _selAssignment == null ? [] :
-                  [BoxShadow(color: _indigo.withOpacity(0.3), blurRadius: 14, offset: const Offset(0, 5))],
-                ),
-                child: _creatingSession
-                    ? const Center(child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5))
-                    : Row(mainAxisAlignment: MainAxisAlignment.center, children: const [
-                        Icon(Icons.qr_code_2_rounded, color: Colors.white, size: 20),
-                        SizedBox(width: 8),
-                        Text('Generate QR Code',
-                            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w700)),
-                      ]),
-              ),
-            ),
-          ],
-        ]),
-      ),
-    ],
-  );
-
-  Widget _buildActiveSession() {
-    final qrPayload = _activeSession?['qrPayload'] as String? ?? '';
-    final unitName  = _activeSession?['unitName']  as String? ?? '';
-    final unitCode  = _activeSession?['unitCode']  as String? ?? '';
-    final expiresAt = _activeSession?['expiresAt'] as String?;
-    final expiry    = expiresAt != null ? DateTime.tryParse(expiresAt) : null;
-    final remaining = expiry != null ? expiry.difference(DateTime.now()) : Duration.zero;
-    final minLeft   = remaining.inMinutes;
-    final secLeft   = remaining.inSeconds % 60;
-
-    return SingleChildScrollView(child: Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(24),
-              boxShadow: [BoxShadow(color: _indigo.withOpacity(0.08), blurRadius: 24, offset: const Offset(0, 8))]),
-          child: Column(children: [
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                decoration: BoxDecoration(color: const Color(0xFFE8F5E9), borderRadius: BorderRadius.circular(20)),
-                child: Row(mainAxisSize: MainAxisSize.min, children: const [
-                  Icon(Icons.circle, color: Color(0xFF2E7D32), size: 8),
-                  SizedBox(width: 6),
-                  Text('LIVE SESSION', style: TextStyle(
-                      fontSize: 10, fontWeight: FontWeight.w800, color: Color(0xFF2E7D32), letterSpacing: 1)),
-                ])),
-              Text('$_scanned / $_total scanned',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _indigo)),
-            ]),
-            const SizedBox(height: 20),
-            // Real QR code from qr_flutter
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(border: Border.all(color: _indigo, width: 3),
-                  borderRadius: BorderRadius.circular(16)),
-              child: QrImageView(data: qrPayload, version: QrVersions.auto,
-                  size: 200, backgroundColor: Colors.white),
-            ),
-            const SizedBox(height: 14),
-            if (unitCode.isNotEmpty) Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(color: _indigo, borderRadius: BorderRadius.circular(8)),
-              child: Text(unitCode, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800))),
-            const SizedBox(height: 6),
-            Text(unitName, textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: Color(0xFF1B1B1B))),
-            const SizedBox(height: 4),
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              Icon(Icons.timer_outlined, size: 14,
-                  color: minLeft < 3 ? const Color(0xFFE53935) : const Color(0xFFF57C00)),
-              const SizedBox(width: 4),
-              Text(
-                remaining.isNegative ? 'Expired'
-                    : 'Expires in ${minLeft}m ${secLeft.toString().padLeft(2, '0')}s',
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                    color: minLeft < 3 ? const Color(0xFFE53935) : const Color(0xFFF57C00)),
-              ),
-            ]),
-            const SizedBox(height: 20),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(color: const Color(0xFFF7F7F7), borderRadius: BorderRadius.circular(14)),
-              child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [
-                _QrStat('$_scanned',           'Scanned',   const Color(0xFF2E7D32)),
-                Container(width: 1, height: 36, color: Colors.grey.shade200),
-                _QrStat('$_total',             'Expected',  _indigo),
-                Container(width: 1, height: 36, color: Colors.grey.shade200),
-                _QrStat('${_total - _scanned}','Remaining', const Color(0xFFE53935)),
-              ]),
-            ),
-            const SizedBox(height: 16),
-            ClipRRect(borderRadius: BorderRadius.circular(6),
-              child: LinearProgressIndicator(
-                value: _total > 0 ? _scanned / _total : 0, minHeight: 8,
-                backgroundColor: Colors.grey.shade100,
-                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF2E7D32)))),
-            const SizedBox(height: 20),
-            GestureDetector(
-              onTap: _endSession,
-              child: Container(
-                height: 48,
-                decoration: BoxDecoration(color: const Color(0xFFFFEBEE),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFE53935).withOpacity(0.4))),
-                child: const Center(child: Text('End Session',
-                    style: TextStyle(color: Color(0xFFE53935), fontWeight: FontWeight.w700, fontSize: 14))),
-              ),
-            ),
-          ]),
-        ),
-      ],
-    ));
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Small widgets
+// Data classes + shared widgets
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _HeaderStat extends StatelessWidget {
@@ -767,19 +441,6 @@ class _HeaderStat extends StatelessWidget {
     Text(label, style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.75))),
   ]);
 }
-
-class _QrStat extends StatelessWidget {
-  final String value, label; final Color color;
-  const _QrStat(this.value, this.label, this.color);
-  @override Widget build(BuildContext context) => Column(children: [
-    Text(value, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: color)),
-    Text(label, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
-  ]);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Data classes
-// ─────────────────────────────────────────────────────────────────────────────
 
 class _Stat { final String value, label; final IconData icon; final Color color;
   const _Stat(this.value, this.label, this.icon, this.color); }

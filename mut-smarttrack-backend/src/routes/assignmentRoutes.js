@@ -9,12 +9,12 @@ import { protect } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// ── Specific named routes BEFORE /:id ────────────────────────────────────────
-router.get('/',                        protect, getAssignments);
-router.post('/',                       protect, createAssignment);
-router.get('/:id',                     protect, getAssignmentById);
-router.patch('/:id',                   protect, updateAssignment);
-router.patch('/:id/students',          protect, updateAssignmentStudents);
-router.delete('/:id',                  protect, deleteAssignment);
+// Named routes BEFORE /:id to avoid conflicts
+router.get('/',               protect, getAssignments);
+router.post('/',              protect, createAssignment);
+router.get('/:id',            protect, getAssignmentById);
+router.patch('/:id',          protect, updateAssignment);
+router.patch('/:id/students', protect, updateAssignmentStudents);
+router.delete('/:id',         protect, deleteAssignment);
 
 export default router;
