@@ -1,5 +1,5 @@
 // controllers/sessionController.js
-import crypto    from 'crypto';
+import crypto     from 'crypto';
 import Session    from '../models/Session.js';
 import Assignment from '../models/Assignment.js';
 import Attendance from '../models/Attendance.js';
@@ -15,9 +15,7 @@ const generateSignature = (studentId, sessionId, timestamp) => {
     .digest('hex');
 };
 
-// ── POST /api/sessions  (Lecturer only) ─────────────────────────────────────
-// Lecturer starts a new attendance session for one of their assignments.
-// Returns session with the QR payload string to encode on the frontend.
+// ── POST /api/sessions  (Lecturer only) ──────────────────────────────────────
 export const createSession = async (req, res) => {
   try {
     if (req.user.role !== 'lecturer') {
@@ -25,11 +23,15 @@ export const createSession = async (req, res) => {
     }
 
     const { assignmentId, location } = req.body;
-    if (!assignmentId) return res.status(400).json({ message: 'assignmentId is required.' });
+    if (!assignmentId) {
+      return res.status(400).json({ message: 'assignmentId is required.' });
+    }
 
     // Verify lecturer owns this assignment
     const assignment = await Assignment.findOne({
-      _id: assignmentId, lecturer: req.user._id, isActive: true,
+      _id:      assignmentId,
+      lecturer: req.user._id ?? req.user.id,   // handle both token formats
+      isActive: true,
     }).populate('unit', 'name code');
 
     if (!assignment) {
@@ -42,20 +44,24 @@ export const createSession = async (req, res) => {
       { isActive: false }
     );
 
-    const qrToken  = Session.generateToken();
+    const qrToken   = Session.generateToken();
     const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
-    // QR payload — this JSON string is what gets encoded into the QR image
+    // ── QR payload — JSON string encoded into the QR image ───────────────────
+    // IMPORTANT: unitName and unitCode are included so the student app can
+    // display the class name immediately after scanning, without an extra API call.
     const qrPayload = JSON.stringify({
-      t: qrToken,
-      a: assignmentId,
-      u: assignment.unit._id.toString(),
-      exp: expiresAt.getTime(),
+      t:        qrToken,
+      a:        assignmentId,
+      u:        assignment.unit._id.toString(),
+      exp:      expiresAt.getTime(),
+      unitName: assignment.unit.name,   // ← displayed in student app after scan
+      unitCode: assignment.unit.code,   // ← displayed in student app after scan
     });
 
     const session = await Session.create({
       assignment: assignmentId,
-      lecturer:   req.user._id,
+      lecturer:   req.user._id ?? req.user.id,
       unit:       assignment.unit._id,
       qrToken,
       qrPayload,
@@ -64,9 +70,10 @@ export const createSession = async (req, res) => {
     });
 
     res.status(201).json({
-      message:    'Session started.',
+      _id:        session._id,          // Flutter uses _activeSession?['_id']
       sessionId:  session._id,
-      qrPayload,                         // ← encode this into the QR widget
+      message:    'Session started.',
+      qrPayload,                        // ← encode this into the QR widget
       expiresAt,
       unitName:   assignment.unit.name,
       unitCode:   assignment.unit.code,
@@ -76,14 +83,15 @@ export const createSession = async (req, res) => {
   }
 };
 
-// ── DELETE /api/sessions/:id  (Lecturer ends session early) ─────────────────
+// ── DELETE /api/sessions/:id  (Lecturer ends session early) ──────────────────
 export const endSession = async (req, res) => {
   try {
     if (req.user.role !== 'lecturer') {
       return res.status(403).json({ message: 'Lecturer access required.' });
     }
+    const lecturerId = req.user._id ?? req.user.id;
     const session = await Session.findOneAndUpdate(
-      { _id: req.params.id, lecturer: req.user._id },
+      { _id: req.params.id, lecturer: lecturerId },
       { isActive: false },
       { new: true }
     );
@@ -101,18 +109,20 @@ export const getSessionStats = async (req, res) => {
       .populate('assignment', 'students');
     if (!session) return res.status(404).json({ message: 'Session not found.' });
 
+    const lecturerId = req.user._id ?? req.user.id;
     if (req.user.role === 'lecturer' &&
-        session.lecturer.toString() !== req.user._id.toString()) {
+        session.lecturer.toString() !== lecturerId.toString()) {
       return res.status(403).json({ message: 'Access denied.' });
     }
 
     const scanned  = await Attendance.countDocuments({ session: req.params.id });
-    const expected = session.assignment?.students?.length ?? 0;
+    const total    = session.assignment?.students?.length ?? 0;   // renamed → total
 
     res.json({
       scanned,
-      expected,
-      remaining: Math.max(0, expected - scanned),
+      total,                                       // Flutter polls _total
+      expected:  total,                            // keep for compatibility
+      remaining: Math.max(0, total - scanned),
       isActive:  session.isActive,
       expiresAt: session.expiresAt,
     });
@@ -121,9 +131,8 @@ export const getSessionStats = async (req, res) => {
   }
 };
 
-// ── POST /api/sessions/verify  (Student — full verification chain) ───────────
+// ── POST /api/sessions/verify  (Student — full verification chain) ────────────
 // Body: { qrPayload, biometricPassed, faceConfidence }
-// This is called after the student has scanned the QR and passed biometric+face
 export const verifyAndMarkAttendance = async (req, res) => {
   try {
     if (req.user.role !== 'student') {
@@ -131,8 +140,11 @@ export const verifyAndMarkAttendance = async (req, res) => {
     }
 
     const { qrPayload, biometricPassed, faceConfidence } = req.body;
+    if (!qrPayload) {
+      return res.status(400).json({ message: 'qrPayload is required.' });
+    }
 
-    // ── 1. Parse and validate QR payload ────────────────────────────────────
+    // ── 1. Parse and validate QR payload ─────────────────────────────────────
     let parsed;
     try {
       parsed = JSON.parse(qrPayload);
@@ -141,13 +153,18 @@ export const verifyAndMarkAttendance = async (req, res) => {
     }
 
     const { t: qrToken, a: assignmentId, exp } = parsed;
-
-    // ── 2. Check expiry client-side first (server enforces too) ─────────────
-    if (Date.now() > exp) {
-      return res.status(400).json({ message: 'QR code has expired. Ask your lecturer to generate a new one.' });
+    if (!qrToken || !assignmentId) {
+      return res.status(400).json({ message: 'Malformed QR code.' });
     }
 
-    // ── 3. Find the session in DB ────────────────────────────────────────────
+    // ── 2. Check expiry ───────────────────────────────────────────────────────
+    if (Date.now() > exp) {
+      return res.status(400).json({
+        message: 'QR code has expired. Ask your lecturer to generate a new one.',
+      });
+    }
+
+    // ── 3. Find active session ────────────────────────────────────────────────
     const session = await Session.findOne({ qrToken, isActive: true });
     if (!session) {
       return res.status(400).json({ message: 'Session not found or already closed.' });
@@ -157,47 +174,49 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'QR code has expired.' });
     }
 
-    // ── 4. Verify student is enrolled in this assignment ─────────────────────
+    // ── 4. Verify student is enrolled ─────────────────────────────────────────
     const assignment = await Assignment.findById(assignmentId);
     if (!assignment) {
       return res.status(404).json({ message: 'Assignment not found.' });
     }
-    const isEnrolled = assignment.students.some(
-      s => s.toString() === req.user._id.toString()
-    );
+    const studentId  = (req.user._id ?? req.user.id).toString();
+    const isEnrolled = assignment.students.some(s => s.toString() === studentId);
     if (!isEnrolled) {
       return res.status(403).json({ message: 'You are not enrolled in this unit.' });
     }
 
     // ── 5. Prevent duplicate attendance ──────────────────────────────────────
     const existing = await Attendance.findOne({
-      session: session._id, student: req.user._id,
+      session: session._id,
+      student: studentId,
     });
     if (existing) {
-      return res.status(400).json({ message: 'Attendance already marked for this session.' });
+      return res.status(400).json({
+        message: 'Attendance already marked for this session.',
+      });
     }
 
-    // ── 6. Validate biometric checks ─────────────────────────────────────────
+    // ── 6. Validate biometric checks ──────────────────────────────────────────
     if (!biometricPassed) {
       return res.status(400).json({ message: 'Biometric verification failed.' });
     }
     const faceScore = parseFloat(faceConfidence) || 0;
     if (faceScore < 0.75) {
-      return res.status(400).json({ message: `Face verification failed (confidence: ${(faceScore * 100).toFixed(0)}%). Try better lighting.` });
+      return res.status(400).json({
+        message: `Face verification failed (confidence: ${(faceScore * 100).toFixed(0)}%). Try better lighting.`,
+      });
     }
 
-    // ── 7. Generate digital signature ────────────────────────────────────────
+    // ── 7. Generate digital signature ─────────────────────────────────────────
     const timestamp        = Date.now();
-    const digitalSignature = generateSignature(
-      req.user._id.toString(), session._id.toString(), timestamp
-    );
+    const digitalSignature = generateSignature(studentId, session._id.toString(), timestamp);
 
-    // ── 8. Write attendance record ───────────────────────────────────────────
+    // ── 8. Write attendance record ────────────────────────────────────────────
     const attendance = await Attendance.create({
       session:           session._id,
       assignment:        assignment._id,
       unit:              session.unit,
-      student:           req.user._id,
+      student:           studentId,
       lecturer:          session.lecturer,
       qrVerified:        true,
       biometricVerified: true,
@@ -225,14 +244,14 @@ export const verifyAndMarkAttendance = async (req, res) => {
   }
 };
 
-// ── GET /api/sessions/my-attendance  (Student — their attendance history) ────
+// ── GET /api/sessions/my-attendance  (Student — attendance history) ───────────
 export const getMyAttendance = async (req, res) => {
   try {
     if (req.user.role !== 'student') {
       return res.status(403).json({ message: 'Student access required.' });
     }
-
-    const records = await Attendance.find({ student: req.user._id })
+    const studentId = req.user._id ?? req.user.id;
+    const records = await Attendance.find({ student: studentId })
       .populate('unit',    'name code')
       .populate('session', 'createdAt location')
       .populate('lecturer','fullName')

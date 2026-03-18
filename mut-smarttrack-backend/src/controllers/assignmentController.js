@@ -4,20 +4,22 @@ import Assignment from '../models/Assignment.js';
 import Unit       from '../models/Unit.js';
 import User       from '../models/User.js';
 
+// ── Helper: get user ID regardless of JWT field name ('_id' or 'id') ─────────
+const getUserId = (user) => user._id ?? user.id;
+
 // ── GET /api/assignments ───────────────────────────────────────────────────────
 export const getAssignments = async (req, res) => {
   try {
-    const role   = req.user.role;
-const userId = req.user._id ?? req.user.id; 
-    let filter = {};
+    const { role } = req.user;
+    const userId   = getUserId(req.user);
+    let filter     = {};
 
     if (role === 'lecturer') {
-      // Cast to ObjectId — string comparison against ObjectId field returns 0 results
       filter.lecturer = new mongoose.Types.ObjectId(userId);
     } else if (role === 'student') {
       filter.students = new mongoose.Types.ObjectId(userId);
     }
-    // admin: no filter — gets all
+    // admin: no filter — returns all
 
     const assignments = await Assignment.find(filter)
       .populate('unit',     'name code department year semester')
@@ -34,6 +36,7 @@ const userId = req.user._id ?? req.user.id;
 // ── GET /api/assignments/:id ───────────────────────────────────────────────────
 export const getAssignmentById = async (req, res) => {
   try {
+    const userId = getUserId(req.user);
     const assignment = await Assignment.findById(req.params.id)
       .populate('unit',     'name code department year semester')
       .populate('lecturer', 'fullName email registrationNumber')
@@ -42,11 +45,11 @@ export const getAssignmentById = async (req, res) => {
     if (!assignment) return res.status(404).json({ message: 'Assignment not found.' });
 
     if (req.user.role === 'student' &&
-        !assignment.students.some(s => s._id.toString() === req.user._id.toString())) {
+        !assignment.students.some(s => s._id.toString() === userId.toString())) {
       return res.status(403).json({ message: 'Access denied.' });
     }
     if (req.user.role === 'lecturer' &&
-        assignment.lecturer._id.toString() !== req.user._id.toString()) {
+        assignment.lecturer._id.toString() !== userId.toString()) {
       return res.status(403).json({ message: 'Access denied.' });
     }
 
@@ -59,7 +62,9 @@ export const getAssignmentById = async (req, res) => {
 // ── POST /api/assignments  (Admin only) ────────────────────────────────────────
 export const createAssignment = async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required.' });
+    }
 
     const {
       unitId, lecturerId,
@@ -99,7 +104,9 @@ export const createAssignment = async (req, res) => {
     res.status(201).json({ message: 'Assignment created.', assignment: populated });
   } catch (err) {
     if (err.code === 11000) {
-      return res.status(409).json({ message: 'This lecturer is already assigned to this unit.' });
+      return res.status(409).json({
+        message: 'This lecturer is already assigned to this unit.',
+      });
     }
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -108,7 +115,9 @@ export const createAssignment = async (req, res) => {
 // ── PATCH /api/assignments/:id/students  (Admin only) ─────────────────────────
 export const updateAssignmentStudents = async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required.' });
+    }
 
     const { add = [], remove = [] } = req.body;
     const assignment = await Assignment.findById(req.params.id);
@@ -116,7 +125,9 @@ export const updateAssignmentStudents = async (req, res) => {
 
     if (add.length > 0) {
       const valid = await User.countDocuments({ _id: { $in: add }, role: 'student' });
-      if (valid !== add.length) return res.status(400).json({ message: 'Invalid student IDs in add list.' });
+      if (valid !== add.length) {
+        return res.status(400).json({ message: 'Invalid student IDs in add list.' });
+      }
     }
 
     const update = {};
@@ -137,10 +148,14 @@ export const updateAssignmentStudents = async (req, res) => {
 // ── PATCH /api/assignments/:id  (Admin only) ───────────────────────────────────
 export const updateAssignment = async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required.' });
+    }
 
     const allowed = ['room', 'schedule', 'isActive', 'academicYear', 'semester'];
-    const updates = Object.fromEntries(Object.entries(req.body).filter(([k]) => allowed.includes(k)));
+    const updates = Object.fromEntries(
+      Object.entries(req.body).filter(([k]) => allowed.includes(k))
+    );
 
     if (req.body.lecturerId) {
       const lec = await User.findOne({ _id: req.body.lecturerId, role: 'lecturer' });
@@ -162,7 +177,9 @@ export const updateAssignment = async (req, res) => {
 // ── DELETE /api/assignments/:id  (Admin only) ──────────────────────────────────
 export const deleteAssignment = async (req, res) => {
   try {
-    if (req.user.role !== 'admin') return res.status(403).json({ message: 'Admin access required.' });
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Admin access required.' });
+    }
     const a = await Assignment.findByIdAndDelete(req.params.id);
     if (!a) return res.status(404).json({ message: 'Assignment not found.' });
     res.json({ message: 'Assignment deleted.' });
