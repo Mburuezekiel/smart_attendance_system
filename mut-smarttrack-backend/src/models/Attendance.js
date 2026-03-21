@@ -8,19 +8,24 @@ const attendanceSchema = new mongoose.Schema({
   student:    { type: mongoose.Schema.Types.ObjectId, ref: 'User',       required: true },
   lecturer:   { type: mongoose.Schema.Types.ObjectId, ref: 'User',       required: true },
 
-  // Verification chain — all three must be true for attendance to count
+  // Verification chain
   qrVerified:        { type: Boolean, default: false },
   biometricVerified: { type: Boolean, default: false },
   faceVerified:      { type: Boolean, default: false },
 
-  // Digital signature: HMAC-SHA256(studentId + sessionId + timestamp, serverSecret)
-  // Generated server-side after all three checks pass — proves record was not forged
+  // Digital signature
   digitalSignature:  { type: String },
   signedAt:          { type: Date },
 
   // Face verification metadata
-  faceConfidence:    { type: Number },   // 0–1 score from ML kit
-  faceImageRef:      { type: String },   // optional: path/key to stored face snapshot
+  faceConfidence:    { type: Number },
+  faceImageRef:      { type: String },
+
+  // Location at time of sign-in
+  location: {
+    latitude:  { type: Number },
+    longitude: { type: Number },
+  },
 
   markedAt: { type: Date, default: Date.now },
   status: {
@@ -29,35 +34,27 @@ const attendanceSchema = new mongoose.Schema({
     default: 'present',
   },
 
-  // ── CANDLELIGHT relay chain fields ─────────────────────────────────────────
+  // ── CANDLELIGHT + GEOFENCE relay fields ────────────────────────────────────
   //
-  // How it works:
-  //   1. When a student's attendance is verified the backend generates a
-  //      single-use relayToken (HMAC tied to attendanceId+studentId+sessionId).
-  //   2. That token is encoded into a relay QR the student shows to classmates.
-  //   3. When a classmate scans it the backend finds this record by relayToken,
-  //      confirms relayUsed=false, then IMMEDIATELY sets relayToken=null and
-  //      relayUsed=true before processing — making screenshots worthless.
-  //   4. When the lecturer ends the session ALL relayTokens in the session are
-  //      wiped to null at once — every student QR dies instantly.
+  // A verified student can generate MULTIPLE relay tokens but only while
+  // physically inside the classroom geofence. Each token is still single-use.
+  //
+  // relayTokens: array of { token, used, issuedAt }
+  //   - New tokens are pushed here each time the student requests one
+  //     (via POST /api/sessions/relay-token) while inside the geofence.
+  //   - Each token is burned (used: true) the moment a classmate scans it.
+  //   - All tokens are wiped when the lecturer ends the session.
+  relayTokens: [
+    {
+      token:    { type: String, required: true },
+      used:     { type: Boolean, default: false },
+      issuedAt: { type: Date,    default: Date.now },
+    }
+  ],
 
-  // The single-use token embedded in this student's relay QR.
-  // null  → token has been burned (used or session ended).
-  relayToken: {
-    type:    String,
-    default: null,
-  },
-
-  // True once this student's relay token has been consumed by a classmate.
-  relayUsed: {
-    type:    Boolean,
-    default: false,
-  },
-
-  // Audit trail: how many hops from the original lecturer QR.
-  // 1 = student scanned the lecturer's QR directly.
-  // 2 = student scanned a classmate's relay QR (1 hop away from lecturer).
-  // 3+ = deeper relay chain.
+  // How many hops from the original lecturer QR (audit trail)
+  // 1 = scanned lecturer QR directly
+  // 2+ = scanned a classmate's relay QR
   chainDepth: {
     type:    Number,
     default: 1,
@@ -66,11 +63,10 @@ const attendanceSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // ── Indexes ───────────────────────────────────────────────────────────────────
-
-// One attendance record per student per session (prevents duplicates)
+// One record per student per session
 attendanceSchema.index({ session: 1, student: 1 }, { unique: true });
 
-// Fast relay token lookup — used on every student scan that carries a relay QR
-attendanceSchema.index({ session: 1, relayToken: 1 });
+// Fast lookup when validating a relay token on scan
+attendanceSchema.index({ session: 1, 'relayTokens.token': 1 });
 
 export default mongoose.model('Attendance', attendanceSchema);

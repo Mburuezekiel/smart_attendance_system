@@ -5,27 +5,47 @@ import Assignment from '../models/Assignment.js';
 import Attendance from '../models/Attendance.js';
 
 const SESSION_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+const DEFAULT_RADIUS_M    = 50;              // 50 metre default geofence
 
-// ── Helper: HMAC digital signature ───────────────────────────────────────────
-const generateSignature = (studentId, sessionId, timestamp) => {
-  const secret = process.env.SIGNATURE_SECRET || 'change_this_in_production';
-  return crypto.createHmac('sha256', secret)
+// ── Haversine distance (metres) ───────────────────────────────────────────────
+const distanceMeters = (lat1, lon1, lat2, lon2) => {
+  const R  = 6371000;
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const a  = Math.sin(Δφ/2) ** 2 +
+             Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+
+// Then in isInsideGeofence:
+const isInsideGeofence = (session, latitude, longitude) => {
+  const { geofence } = session;
+  if (!geofence?.latitude || !geofence?.longitude) return true;
+  const dist = Session.distanceMeters(     // ← use the model static
+    latitude, longitude,
+    geofence.latitude, geofence.longitude
+  );
+  return dist <= (geofence.radiusMeters ?? 50);
+};
+// ── HMAC helpers ──────────────────────────────────────────────────────────────
+const secret = () => process.env.SIGNATURE_SECRET || 'change_this_in_production';
+
+const generateSignature = (studentId, sessionId, timestamp) =>
+  crypto.createHmac('sha256', secret())
     .update(`${studentId}:${sessionId}:${timestamp}`)
     .digest('hex');
-};
 
-// ── Helper: single-use CANDLELIGHT relay token ────────────────────────────────
-// Chained to the verified student's attendanceId so the backend can trace
-// exactly who passed the chain to whom.
-const generateRelayToken = (attendanceId, studentId, sessionId) => {
-  const secret = process.env.SIGNATURE_SECRET || 'change_this_in_production';
-  return crypto.createHmac('sha256', secret)
-    .update(`relay:${attendanceId}:${studentId}:${sessionId}`)
+const generateRelayToken = (attendanceId, studentId, sessionId, nonce) =>
+  crypto.createHmac('sha256', secret())
+    .update(`relay:${attendanceId}:${studentId}:${sessionId}:${nonce}`)
     .digest('hex');
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sessions  (Lecturer only)
+// Body: { assignmentId, location?, geofence?: { latitude, longitude, radiusMeters } }
 // ─────────────────────────────────────────────────────────────────────────────
 export const createSession = async (req, res) => {
   try {
@@ -33,7 +53,7 @@ export const createSession = async (req, res) => {
       return res.status(403).json({ message: 'Lecturer access required.' });
     }
 
-    const { assignmentId, location } = req.body;
+    const { assignmentId, location, geofence } = req.body;
     if (!assignmentId) {
       return res.status(400).json({ message: 'assignmentId is required.' });
     }
@@ -48,7 +68,6 @@ export const createSession = async (req, res) => {
       return res.status(404).json({ message: 'Assignment not found or not yours.' });
     }
 
-    // Close any currently active session for this assignment
     await Session.updateMany(
       { assignment: assignmentId, isActive: true },
       { isActive: false }
@@ -57,7 +76,6 @@ export const createSession = async (req, res) => {
     const qrToken   = Session.generateToken();
     const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
-    // relay: false marks this as the original lecturer QR (not a student relay)
     const qrPayload = JSON.stringify({
       t:        qrToken,
       a:        assignmentId,
@@ -76,6 +94,14 @@ export const createSession = async (req, res) => {
       qrPayload,
       expiresAt,
       location:   location || assignment.room || '',
+      // Store the geofence so every verify call can check it
+      geofence: geofence
+        ? {
+            latitude:     geofence.latitude,
+            longitude:    geofence.longitude,
+            radiusMeters: geofence.radiusMeters ?? DEFAULT_RADIUS_M,
+          }
+        : { latitude: null, longitude: null, radiusMeters: DEFAULT_RADIUS_M },
     });
 
     res.status(201).json({
@@ -86,6 +112,7 @@ export const createSession = async (req, res) => {
       expiresAt,
       unitName:   assignment.unit.name,
       unitCode:   assignment.unit.code,
+      geofence:   session.geofence,
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -93,7 +120,7 @@ export const createSession = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/sessions/:id  (Lecturer — kills the session AND all relay chains)
+// DELETE /api/sessions/:id  (Lecturer ends session — kills ALL relay tokens)
 // ─────────────────────────────────────────────────────────────────────────────
 export const endSession = async (req, res) => {
   try {
@@ -108,11 +135,10 @@ export const endSession = async (req, res) => {
     );
     if (!session) return res.status(404).json({ message: 'Session not found.' });
 
-    // Burn ALL relay tokens for this session instantly
-    // Any student QR shown after this point will fail validation
+    // Nuke every relay token in every attendance record for this session
     await Attendance.updateMany(
       { session: req.params.id },
-      { relayToken: null, relayUsed: true }
+      { $set: { 'relayTokens.$[].used': true } }
     );
 
     res.json({ message: 'Session ended. All relay tokens revoked.' });
@@ -155,23 +181,18 @@ export const getSessionStats = async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sessions/verify  (Student marks attendance)
 //
-// ╔══════════════ CANDLELIGHT ALGORITHM ══════════════╗
-// ║                                                   ║
-// ║  Lecturer generates original QR (relay: false)    ║
-// ║       ↓                                           ║
-// ║  Student A scans → signs → gets relayQrPayload    ║
-// ║       ↓  (relayToken burned on Student B's scan)  ║
-// ║  Student B scans A's QR → signs → gets own relay  ║
-// ║       ↓                                           ║
-// ║  ...chain continues...                            ║
-// ║       ↓                                           ║
-// ║  Lecturer ends session → ALL relay tokens nuked   ║
-// ║  No further QRs work regardless of who holds them ║
-// ╚═══════════════════════════════════════════════════╝
-//
-// Anti-screenshot: relay tokens are single-use and burned immediately.
-// Anti-fraud: each relay is tied to a real verified attendance record.
-// Anti-loophole: session.isActive is checked on EVERY scan.
+// ╔══════════════════════ CANDLELIGHT + GEOFENCE ══════════════════════╗
+// ║                                                                    ║
+// ║  Every scan (original OR relay) requires the student's device      ║
+// ║  to be inside the classroom geofence.                              ║
+// ║                                                                    ║
+// ║  After verifying, a student can request as many relay tokens as    ║
+// ║  they like via POST /api/sessions/request-relay — but ONLY while   ║
+// ║  their device is still inside the geofence.                        ║
+// ║                                                                    ║
+// ║  Each relay token is single-use and burned on scan.                ║
+// ║  Lecturer ending the session burns ALL tokens immediately.         ║
+// ╚════════════════════════════════════════════════════════════════════╝
 // ─────────────────────────────────────────────────────────────────────────────
 export const verifyAndMarkAttendance = async (req, res) => {
   try {
@@ -179,12 +200,12 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(403).json({ message: 'Student access required.' });
     }
 
-    const { qrPayload, biometricPassed, faceConfidence } = req.body;
+    const { qrPayload, biometricPassed, faceConfidence, latitude, longitude } = req.body;
     if (!qrPayload) {
       return res.status(400).json({ message: 'qrPayload is required.' });
     }
 
-    // ── 1. Parse QR payload ───────────────────────────────────────────────────
+    // ── 1. Parse QR ───────────────────────────────────────────────────────────
     let parsed;
     try { parsed = JSON.parse(qrPayload); }
     catch { return res.status(400).json({ message: 'Invalid QR code.' }); }
@@ -194,14 +215,14 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'Malformed QR code.' });
     }
 
-    // ── 2. Expiry check ───────────────────────────────────────────────────────
+    // ── 2. Expiry ─────────────────────────────────────────────────────────────
     if (Date.now() > exp) {
       return res.status(400).json({
-        message: 'QR code has expired. Ask your lecturer for a new one.',
+        message: 'QR code has expired. Ask your lecturer or a classmate for a new one.',
       });
     }
 
-    // ── 3. Find active session ────────────────────────────────────────────────
+    // ── 3. Active session ─────────────────────────────────────────────────────
     const session = await Session.findOne({ qrToken, isActive: true });
     if (!session) {
       return res.status(400).json({
@@ -213,17 +234,29 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'QR code has expired.' });
     }
 
-    // ── 4. RELAY CHAIN VALIDATION ─────────────────────────────────────────────
+    // ── 4. GEOFENCE CHECK — student must be inside the classroom ──────────────
+    if (latitude == null || longitude == null) {
+      return res.status(400).json({
+        message: 'Location is required to mark attendance.',
+      });
+    }
+    if (!isInsideGeofence(session, latitude, longitude)) {
+      return res.status(403).json({
+        message: 'You must be inside the classroom to mark attendance.',
+      });
+    }
+
+    // ── 5. RELAY CHAIN VALIDATION ─────────────────────────────────────────────
     if (relay === true) {
       if (!relayToken) {
         return res.status(400).json({ message: 'Relay QR is missing its token.' });
       }
 
-      // Find the attendance record that owns this relay token
+      // Find the attendance record that contains this unused relay token
       const relaySource = await Attendance.findOne({
-        session:    session._id,
-        relayToken: relayToken,
-        relayUsed:  false,     // must not have been used yet
+        session:              session._id,
+        'relayTokens.token':  relayToken,
+        'relayTokens.used':   false,
       });
 
       if (!relaySource) {
@@ -232,14 +265,14 @@ export const verifyAndMarkAttendance = async (req, res) => {
         });
       }
 
-      // BURN immediately — one-time use enforced at the DB level
-      await Attendance.findByIdAndUpdate(relaySource._id, {
-        relayToken: null,
-        relayUsed:  true,
-      });
+      // BURN this specific token — atomic update on the matching array element
+      await Attendance.updateOne(
+        { _id: relaySource._id, 'relayTokens.token': relayToken },
+        { $set: { 'relayTokens.$.used': true } }
+      );
     }
 
-    // ── 5. Enrolment check ────────────────────────────────────────────────────
+    // ── 6. Enrolment check ────────────────────────────────────────────────────
     const assignment = await Assignment.findById(assignmentId);
     if (!assignment) {
       return res.status(404).json({ message: 'Assignment not found.' });
@@ -250,7 +283,7 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(403).json({ message: 'You are not enrolled in this unit.' });
     }
 
-    // ── 6. Duplicate check ────────────────────────────────────────────────────
+    // ── 7. Duplicate check ────────────────────────────────────────────────────
     const existing = await Attendance.findOne({
       session: session._id, student: studentId,
     });
@@ -260,24 +293,30 @@ export const verifyAndMarkAttendance = async (req, res) => {
       });
     }
 
-    // ── 7. Biometric checks ───────────────────────────────────────────────────
+    // ── 8. Biometric + face checks ────────────────────────────────────────────
     if (!biometricPassed) {
       return res.status(400).json({ message: 'Biometric verification failed.' });
     }
     const faceScore = parseFloat(faceConfidence) || 0;
     if (faceScore < 0.75) {
       return res.status(400).json({
-        message: `Face verification failed (${(faceScore * 100).toFixed(0)}% confidence). Try better lighting.`,
+        message: `Face verification failed (${(faceScore * 100).toFixed(0)}%). Try better lighting.`,
       });
     }
 
-    // ── 8. Digital signature ──────────────────────────────────────────────────
+    // ── 9. Digital signature ──────────────────────────────────────────────────
     const timestamp        = Date.now();
     const digitalSignature = generateSignature(
       studentId, session._id.toString(), timestamp
     );
 
-    // ── 9. Write attendance + issue relay token ───────────────────────────────
+    // ── 10. Write attendance record ───────────────────────────────────────────
+    // Generate the first relay token for this student immediately
+    const nonce          = crypto.randomBytes(8).toString('hex');
+    const firstRelayToken = generateRelayToken(
+      `pre_${studentId}`, studentId, session._id.toString(), nonce
+    );
+
     const attendance = await Attendance.create({
       session:           session._id,
       assignment:        assignment._id,
@@ -291,22 +330,22 @@ export const verifyAndMarkAttendance = async (req, res) => {
       digitalSignature,
       signedAt:          new Date(timestamp),
       status:            'present',
-      // Candlelight fields
-      relayToken:  'pending',   // placeholder — replaced below with real token
-      relayUsed:   false,
-      chainDepth:  relay === true ? (parsed.chainDepth ?? 0) + 1 : 1,
+      location:          { latitude, longitude },
+      chainDepth:        relay === true ? (parsed.chainDepth ?? 0) + 1 : 1,
+      // Start with one relay token — student can request more while in geofence
+      relayTokens: [{ token: firstRelayToken, used: false, issuedAt: new Date() }],
     });
 
-    // Generate the final relay token now that we have the real attendanceId
+    // Regenerate with real attendanceId now that we have it
     const finalRelayToken = generateRelayToken(
-      attendance._id.toString(), studentId, session._id.toString()
+      attendance._id.toString(), studentId, session._id.toString(), nonce
     );
-    await Attendance.findByIdAndUpdate(attendance._id, { relayToken: finalRelayToken });
+    await Attendance.updateOne(
+      { _id: attendance._id, 'relayTokens.token': firstRelayToken },
+      { $set: { 'relayTokens.$.token': finalRelayToken } }
+    );
 
-    // ── 10. Build the relay QR payload for this student ───────────────────────
-    // The student's app will encode this string into a QR they can show
-    // to classmates. It carries the same session qrToken (session still
-    // active) plus their unique single-use relayToken.
+    // ── 11. Build first relay QR payload ──────────────────────────────────────
     const relayQrPayload = JSON.stringify({
       t:          qrToken,
       a:          assignmentId,
@@ -331,9 +370,92 @@ export const verifyAndMarkAttendance = async (req, res) => {
         faceScore: `${(faceScore * 100).toFixed(0)}%`,
       },
       candlelight: {
-        relayQrPayload,
+        relayQrPayload,           // first relay QR — show immediately
         chainDepth: attendance.chainDepth,
+        // Student can call /request-relay to get more tokens while in geofence
+        canRequestMore: true,
       },
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/sessions/request-relay
+// Called by a verified student who wants another relay token to give to a
+// second (or third…) classmate. Only works if:
+//   (a) student already has a verified attendance record for this session
+//   (b) student's device is still inside the classroom geofence
+//   (c) the session is still active
+// ─────────────────────────────────────────────────────────────────────────────
+export const requestRelayToken = async (req, res) => {
+  try {
+    if (req.user.role !== 'student') {
+      return res.status(403).json({ message: 'Student access required.' });
+    }
+
+    const { sessionId, latitude, longitude } = req.body;
+    if (!sessionId || latitude == null || longitude == null) {
+      return res.status(400).json({
+        message: 'sessionId, latitude and longitude are required.',
+      });
+    }
+
+    const studentId = (req.user._id ?? req.user.id).toString();
+
+    // ── Check session is still active ─────────────────────────────────────────
+    const session = await Session.findOne({ _id: sessionId, isActive: true });
+    if (!session) {
+      return res.status(400).json({ message: 'Session is no longer active.' });
+    }
+
+    // ── Geofence check ────────────────────────────────────────────────────────
+    if (!isInsideGeofence(session, latitude, longitude)) {
+      return res.status(403).json({
+        message: 'You must be inside the classroom to generate a relay QR.',
+      });
+    }
+
+    // ── Confirm this student is already verified for this session ─────────────
+    const attendance = await Attendance.findOne({
+      session: sessionId, student: studentId,
+    });
+    if (!attendance) {
+      return res.status(403).json({
+        message: 'You have not signed attendance for this session yet.',
+      });
+    }
+
+    // ── Generate a fresh single-use relay token ────────────────────────────────
+    const nonce     = crypto.randomBytes(8).toString('hex');
+    const newToken  = generateRelayToken(
+      attendance._id.toString(), studentId, sessionId, nonce
+    );
+
+    // Push it into the student's relay token array
+    await Attendance.updateOne(
+      { _id: attendance._id },
+      { $push: { relayTokens: { token: newToken, used: false, issuedAt: new Date() } } }
+    );
+
+    // Build the relay QR payload
+    const session2   = await Session.findById(sessionId); // re-fetch for qrToken
+    const relayQrPayload = JSON.stringify({
+      t:          session2.qrToken,
+      a:          attendance.assignment.toString(),
+      u:          attendance.unit.toString(),
+      exp:        session2.expiresAt.getTime(),
+      unitName:   req.body.unitName ?? '',
+      unitCode:   req.body.unitCode ?? '',
+      relay:      true,
+      relayToken: newToken,
+      chainDepth: attendance.chainDepth,
+    });
+
+    res.status(201).json({
+      message:         'New relay token issued.',
+      relayQrPayload,
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });

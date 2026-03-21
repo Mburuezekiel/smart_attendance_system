@@ -1,16 +1,18 @@
 // lib/features/assignments/presentation/student_scan_page.dart
 //
-// pubspec.yaml:
+// pubspec.yaml additions:
 //   mobile_scanner: ^5.1.1
 //   local_auth: ^2.3.0
 //   google_mlkit_face_detection: ^0.11.0
 //   camera: ^0.11.0
 //   qr_flutter: ^4.1.0
+//   geolocator: ^12.0.0
 
 import 'dart:convert';
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -29,22 +31,44 @@ class _StudentScanPageState extends State<StudentScanPage> {
   String? _qrPayload;
   String? _className;
   String? _unitCode;
+  String? _sessionId;
   bool    _bioPassed  = false;
   double  _faceScore  = 0.0;
   String? _errorMsg;
   bool    _processing = false;
   Map<String, dynamic>? _attendanceResult;
 
-  // Candlelight — relay QR issued after successful sign
-  String? _relayQrPayload;
+  // Candlelight
+  String?  _relayQrPayload;
+  bool     _requestingRelay = false;
+  Position? _lastPosition;
 
   static const _green = Color(0xFF2E7D32);
 
   void _reset() => setState(() {
     _step = 0; _qrPayload = null; _className = null; _unitCode = null;
-    _bioPassed = false; _faceScore = 0.0; _errorMsg = null;
-    _processing = false; _attendanceResult = null; _relayQrPayload = null;
+    _sessionId = null; _bioPassed = false; _faceScore = 0.0;
+    _errorMsg = null; _processing = false; _attendanceResult = null;
+    _relayQrPayload = null; _requestingRelay = false; _lastPosition = null;
   });
+
+  // ── Get current GPS position ──────────────────────────────────────────────
+  Future<Position?> _getPosition() async {
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.deniedForever ||
+          perm == LocationPermission.denied) return null;
+
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 
   // ── Step 0 → 1 ────────────────────────────────────────────────────────────
   void _onQrDetected(String rawPayload) {
@@ -99,7 +123,7 @@ class _StudentScanPageState extends State<StudentScanPage> {
       } else {
         setState(() {
           _processing = false;
-          _errorMsg   = 'Biometric verification cancelled or failed. Please try again.';
+          _errorMsg   = 'Biometric verification cancelled or failed.';
           _step       = 5;
         });
       }
@@ -122,18 +146,42 @@ class _StudentScanPageState extends State<StudentScanPage> {
   Future<void> _submitAttendance() async {
     if (_qrPayload == null) return;
 
+    // Get location — required by the geofence check on the backend
+    final position = await _getPosition();
+    if (position == null) {
+      setState(() {
+        _errorMsg   = 'Could not get your location. Please enable GPS and try again.';
+        _processing = false;
+        _step       = 5;
+      });
+      return;
+    }
+    _lastPosition = position;
+
     final result = await ApiService().post('/sessions/verify', {
       'qrPayload':       _qrPayload!,
       'biometricPassed': _bioPassed,
       'faceConfidence':  _faceScore,
+      'latitude':        position.latitude,
+      'longitude':       position.longitude,
     });
 
     if (!mounted) return;
     if (result.success) {
-      final sig = result.data?['digitalSignature'] as String? ?? '';
-      // Extract the relay QR payload issued by the backend (candlelight)
+      final sig         = result.data?['digitalSignature'] as String? ?? '';
       final candlelight = result.data?['candlelight'] as Map<String, dynamic>?;
       final relay       = candlelight?['relayQrPayload'] as String?;
+
+      // Extract sessionId from the qrPayload so we can request more relay tokens
+      try {
+        final parsed = jsonDecode(_qrPayload!) as Map<String, dynamic>;
+        // The session _id isn't in the QR payload but the attendance response has it
+        _sessionId = result.data?['attendanceId'] as String?; // used as ref below
+      } catch (_) {}
+
+      // Store sessionId properly from backend if provided
+      final sessionIdFromResult = result.data?['sessionId'] as String?;
+      if (sessionIdFromResult != null) _sessionId = sessionIdFromResult;
 
       setState(() {
         _attendanceResult = {
@@ -152,6 +200,66 @@ class _StudentScanPageState extends State<StudentScanPage> {
         _processing = false;
         _step       = 5;
       });
+    }
+  }
+
+  // ── Request another relay token (geofence enforced on backend) ────────────
+  Future<void> _requestMoreRelay() async {
+    if (_sessionId == null && _attendanceResult == null) return;
+    setState(() => _requestingRelay = true);
+
+    final position = await _getPosition();
+    if (position == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Could not get your location. Please enable GPS.'),
+          backgroundColor: Colors.red,
+        ));
+        setState(() => _requestingRelay = false);
+      }
+      return;
+    }
+
+    // Derive sessionId — stored in attendance result or parsed from QR
+    String? sid = _sessionId;
+    if (sid == null && _qrPayload != null) {
+      try {
+        // We don't have sessionId in QR but we pass attendanceId as proxy
+        // The backend endpoint accepts sessionId — so we need it from the result
+        sid = (_attendanceResult?['sessionId'] ?? _attendanceResult?['attendanceId']) as String?;
+      } catch (_) {}
+    }
+
+    if (sid == null) {
+      setState(() => _requestingRelay = false);
+      return;
+    }
+
+    final result = await ApiService().post('/sessions/request-relay', {
+      'sessionId': sid,
+      'latitude':  position.latitude,
+      'longitude': position.longitude,
+      'unitName':  _className ?? '',
+      'unitCode':  _unitCode  ?? '',
+    });
+
+    if (!mounted) return;
+    setState(() => _requestingRelay = false);
+
+    if (result.success) {
+      final newRelay = result.data?['relayQrPayload'] as String?;
+      if (newRelay != null) {
+        setState(() => _relayQrPayload = newRelay);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('New relay QR generated! Show it to your classmate.'),
+          backgroundColor: Color(0xFF2E7D32),
+        ));
+      }
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result.error ?? 'Could not generate relay QR.'),
+        backgroundColor: Colors.red,
+      ));
     }
   }
 
@@ -191,13 +299,15 @@ class _StudentScanPageState extends State<StudentScanPage> {
       2 => _BiometricWidget(processing: _processing, onScan: _doFingerprint),
       3 => _FaceWidget(onVerified: _onFaceVerified),
       4 => _DoneWidget(
-            className:       _className ?? '',
-            unitCode:        _unitCode  ?? '',
-            result:          _attendanceResult,
-            processing:      _processing,
-            faceScore:       _faceScore,
-            relayQrPayload:  _relayQrPayload,
-            onReset:         _reset,
+            className:        _className ?? '',
+            unitCode:         _unitCode  ?? '',
+            result:           _attendanceResult,
+            processing:       _processing,
+            faceScore:        _faceScore,
+            relayQrPayload:   _relayQrPayload,
+            requestingRelay:  _requestingRelay,
+            onRequestRelay:   _requestMoreRelay,
+            onReset:          _reset,
           ),
       5 => _ErrorWidget(message: _errorMsg ?? 'Something went wrong.', onRetry: _reset),
       _ => const SizedBox.shrink(),
@@ -240,9 +350,8 @@ class _QrScanStepState extends State<_QrScanStep> {
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
             color: Colors.white, borderRadius: BorderRadius.circular(24),
-            boxShadow: [BoxShadow(
-                color: _green.withOpacity(0.08), blurRadius: 24,
-                offset: const Offset(0, 8))],
+            boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+                blurRadius: 24, offset: const Offset(0, 8))],
           ),
           child: Column(children: [
             if (_showCamera) ...[
@@ -254,7 +363,7 @@ class _QrScanStepState extends State<_QrScanStep> {
                 ),
               ),
               const SizedBox(height: 12),
-              Text('Scan lecturer QR or a verified classmate\'s QR',
+              Text('Scan lecturer QR or a verified classmate\'s relay QR',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
               const SizedBox(height: 16),
@@ -279,7 +388,7 @@ class _QrScanStepState extends State<_QrScanStep> {
                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
                       color: Color(0xFF1B1B1B))),
               const SizedBox(height: 8),
-              Text('Scan the lecturer\'s QR code, or a verified classmate\'s relay QR',
+              Text('Scan the lecturer\'s QR or a verified classmate\'s relay QR',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 13, color: Colors.grey.shade500, height: 1.5)),
               const SizedBox(height: 24),
@@ -318,22 +427,25 @@ class _QrSuccessWidget extends StatelessWidget {
         padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
           color: Colors.white, borderRadius: BorderRadius.circular(24),
-          boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+          boxShadow: [BoxShadow(color: const Color(0xFF2E7D32).withOpacity(0.08),
               blurRadius: 24, offset: const Offset(0, 8))],
         ),
         child: Column(children: [
           Container(width: 80, height: 80,
               decoration: const BoxDecoration(
                   shape: BoxShape.circle, color: Color(0xFFE8F5E9)),
-              child: const Icon(Icons.check_circle_rounded, color: _green, size: 46)),
+              child: const Icon(Icons.check_circle_rounded,
+                  color: Color(0xFF2E7D32), size: 46)),
           const SizedBox(height: 16),
           const Text('QR Verified!',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _green)),
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
+                  color: Color(0xFF2E7D32))),
           if (unitCode.isNotEmpty) ...[
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(color: _green, borderRadius: BorderRadius.circular(8)),
+              decoration: BoxDecoration(color: _green,
+                  borderRadius: BorderRadius.circular(8)),
               child: Text(unitCode,
                   style: const TextStyle(color: Colors.white, fontSize: 11,
                       fontWeight: FontWeight.w800)),
@@ -449,9 +561,7 @@ class _FaceWidgetState extends State<_FaceWidget> {
   );
 
   @override void initState() { super.initState(); _initCamera(); }
-
-  @override
-  void dispose() { _cam?.dispose(); _faceDetector.close(); super.dispose(); }
+  @override void dispose()   { _cam?.dispose(); _faceDetector.close(); super.dispose(); }
 
   Future<void> _initCamera() async {
     try {
@@ -468,7 +578,7 @@ class _FaceWidgetState extends State<_FaceWidget> {
       await _cam!.initialize();
       if (mounted) setState(() => _cameraReady = true);
     } catch (e) {
-      if (mounted) setState(() => _status = 'Camera init failed: ${e.toString()}');
+      if (mounted) setState(() => _status = 'Camera init failed: $e');
     }
   }
 
@@ -476,9 +586,9 @@ class _FaceWidgetState extends State<_FaceWidget> {
     if (_scanning || _cam == null || !_cam!.value.isInitialized) return;
     setState(() { _scanning = true; _status = 'Detecting face…'; });
     try {
-      final xFile     = await _cam!.takePicture();
-      final inputImg  = InputImage.fromFilePath(xFile.path);
-      final faces     = await _faceDetector.processImage(inputImg);
+      final xFile    = await _cam!.takePicture();
+      final inputImg = InputImage.fromFilePath(xFile.path);
+      final faces    = await _faceDetector.processImage(inputImg);
       try { File(xFile.path).deleteSync(); } catch (_) {}
       if (!mounted) return;
 
@@ -487,7 +597,7 @@ class _FaceWidgetState extends State<_FaceWidget> {
         return;
       }
       final face       = faces.first;
-      final confidence = ((face.leftEyeOpenProbability ?? 0.0) +
+      final confidence = ((face.leftEyeOpenProbability  ?? 0.0) +
                           (face.rightEyeOpenProbability ?? 0.0)) / 2.0;
 
       if (confidence >= 0.75) {
@@ -544,9 +654,11 @@ class _FaceWidgetState extends State<_FaceWidget> {
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
-                color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(10)),
+                color: const Color(0xFFFFF8E1),
+                borderRadius: BorderRadius.circular(10)),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.light_mode_outlined, color: Color(0xFFF57C00), size: 14),
+              const Icon(Icons.light_mode_outlined,
+                  color: Color(0xFFF57C00), size: 14),
               const SizedBox(width: 6),
               Text('Face the light source for best results',
                   style: TextStyle(fontSize: 11, color: Colors.orange.shade700,
@@ -571,15 +683,17 @@ class _FaceWidgetState extends State<_FaceWidget> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 4 — Done + CANDLELIGHT relay QR
+// STEP 4 — Done + CANDLELIGHT multi-relay with geofence
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _DoneWidget extends StatelessWidget {
-  final String   className, unitCode;
+  final String  className, unitCode;
   final Map<String, dynamic>? result;
-  final bool     processing;
-  final double   faceScore;
-  final String?  relayQrPayload;   // candlelight relay payload
+  final bool    processing;
+  final double  faceScore;
+  final String? relayQrPayload;
+  final bool    requestingRelay;
+  final VoidCallback onRequestRelay;
   final VoidCallback onReset;
   static const _green = Color(0xFF2E7D32);
 
@@ -590,6 +704,8 @@ class _DoneWidget extends StatelessWidget {
     required this.processing,
     required this.faceScore,
     required this.relayQrPayload,
+    required this.requestingRelay,
+    required this.onRequestRelay,
     required this.onReset,
   });
 
@@ -628,13 +744,14 @@ class _DoneWidget extends StatelessWidget {
                 child: const Icon(Icons.verified_rounded, color: _green, size: 52)),
             const SizedBox(height: 20),
             const Text('Attendance Marked!',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: _green)),
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900,
+                    color: _green)),
             const SizedBox(height: 8),
             if (unitCode.isNotEmpty) ...[
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                    color: _green, borderRadius: BorderRadius.circular(8)),
+                decoration: BoxDecoration(color: _green,
+                    borderRadius: BorderRadius.circular(8)),
                 child: Text(unitCode,
                     style: const TextStyle(color: Colors.white, fontSize: 11,
                         fontWeight: FontWeight.w800)),
@@ -651,8 +768,6 @@ class _DoneWidget extends StatelessWidget {
               style: TextStyle(fontSize: 12, color: Colors.grey.shade500),
             ),
             const SizedBox(height: 20),
-
-            // Verification chain
             Container(
               padding: const EdgeInsets.all(14),
               decoration: BoxDecoration(
@@ -665,11 +780,12 @@ class _DoneWidget extends StatelessWidget {
                 const Divider(height: 16, color: Color(0xFFEEEEEE)),
                 _DoneRow(Icons.face_retouching_natural, 'Face ID',    faceLabel),
                 const Divider(height: 16, color: Color(0xFFEEEEEE)),
+                _DoneRow(Icons.my_location_rounded,     'Location',   'Verified ✓'),
+                const Divider(height: 16, color: Color(0xFFEEEEEE)),
                 _DoneRow(Icons.verified_user_rounded,   'Signature',  'Valid'),
               ]),
             ),
             const SizedBox(height: 12),
-
             if (shortSig.isNotEmpty)
               Container(
                 padding: const EdgeInsets.all(12),
@@ -700,44 +816,43 @@ class _DoneWidget extends StatelessWidget {
           ]),
         ),
 
-        // ── CANDLELIGHT relay QR card ─────────────────────────────────────────
-        if (relayQrPayload != null) ...[
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: _green.withOpacity(0.3), width: 1.5),
-              boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
-                  blurRadius: 20, offset: const Offset(0, 6))],
-            ),
-            child: Column(children: [
+        // ── Candlelight relay card ────────────────────────────────────────────
+        const SizedBox(height: 20),
+        Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: _green.withOpacity(0.3), width: 1.5),
+            boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+                blurRadius: 20, offset: const Offset(0, 6))],
+          ),
+          child: Column(children: [
 
-              // Header
-              Row(children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                      color: _green.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(10)),
-                  child: const Icon(Icons.local_fire_department_rounded,
-                      color: _green, size: 20),
-                ),
-                const SizedBox(width: 10),
-                const Expanded(
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('Pass the Flame 🕯️',
-                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
-                            color: Color(0xFF1B1B1B))),
-                    Text('Share your QR with a classmate who hasn\'t signed yet',
-                        style: TextStyle(fontSize: 11, color: Color(0xFF666666))),
-                  ]),
-                ),
-              ]),
-              const SizedBox(height: 16),
+            // Header
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                    color: _green.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(10)),
+                child: const Icon(Icons.local_fire_department_rounded,
+                    color: _green, size: 20),
+              ),
+              const SizedBox(width: 10),
+              const Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Pass the Flame 🕯️',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
+                        color: Color(0xFF1B1B1B))),
+                Text('Help classmates who haven\'t signed yet',
+                    style: TextStyle(fontSize: 11, color: Color(0xFF666666))),
+              ])),
+            ]),
+            const SizedBox(height: 16),
 
-              // Relay QR
+            // QR display
+            if (relayQrPayload != null) ...[
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -752,34 +867,95 @@ class _DoneWidget extends StatelessWidget {
                   eyeStyle: const QrEyeStyle(
                       eyeShape: QrEyeShape.square, color: _green),
                   dataModuleStyle: const QrDataModuleStyle(
-                      dataModuleShape: QrDataModuleShape.square, color: _green),
+                      dataModuleShape: QrDataModuleShape.square,
+                      color: _green),
                 ),
               ),
-              const SizedBox(height: 14),
-
-              // Single-use warning
+              const SizedBox(height: 12),
+            ] else ...[
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                height: 80,
                 decoration: BoxDecoration(
-                    color: const Color(0xFFFFF8E1),
+                    color: const Color(0xFFF5F5F5),
                     borderRadius: BorderRadius.circular(12)),
-                child: Row(children: [
-                  const Icon(Icons.info_outline_rounded,
-                      color: Color(0xFFF57C00), size: 16),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Single-use only — burns after one scan.\n'
-                      'QR becomes invalid when the lecturer ends the session.',
-                      style: TextStyle(fontSize: 11, color: Colors.orange.shade800,
-                          height: 1.5),
-                    ),
-                  ),
-                ]),
+                child: Center(child: Text('Tap below to generate a relay QR',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade400))),
               ),
-            ]),
-          ),
-        ],
+              const SizedBox(height: 12),
+            ],
+
+            // Single-use info
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFFFF8E1),
+                  borderRadius: BorderRadius.circular(12)),
+              child: Row(children: [
+                const Icon(Icons.info_outline_rounded,
+                    color: Color(0xFFF57C00), size: 16),
+                const SizedBox(width: 8),
+                Expanded(child: Text(
+                  'Each QR is single-use and burns after one scan.\n'
+                  'You can generate a new one for each classmate — '
+                  'but only while you\'re inside the classroom.',
+                  style: TextStyle(fontSize: 11, color: Colors.orange.shade800,
+                      height: 1.5),
+                )),
+              ]),
+            ),
+            const SizedBox(height: 16),
+
+            // Geofence badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5E9),
+                  borderRadius: BorderRadius.circular(12)),
+              child: Row(children: [
+                const Icon(Icons.location_on_rounded,
+                    color: Color(0xFF2E7D32), size: 16),
+                const SizedBox(width: 8),
+                Expanded(child: Text(
+                  'Geofence active — you must stay within the classroom boundary to generate relay QRs.',
+                  style: TextStyle(fontSize: 11, color: Colors.green.shade800,
+                      height: 1.5),
+                )),
+              ]),
+            ),
+            const SizedBox(height: 16),
+
+            // Generate new relay button
+            GestureDetector(
+              onTap: requestingRelay ? null : onRequestRelay,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                height: 50,
+                decoration: BoxDecoration(
+                  color: requestingRelay
+                      ? Colors.grey.shade200
+                      : const Color(0xFFE8F5E9),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: requestingRelay ? Colors.grey.shade300 : _green,
+                      width: 1.5),
+                ),
+                child: Center(child: requestingRelay
+                    ? const SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(
+                            color: Color(0xFF2E7D32), strokeWidth: 2))
+                    : Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                        const Icon(Icons.add_circle_outline_rounded,
+                            color: _green, size: 18),
+                        const SizedBox(width: 8),
+                        const Text('Generate New Relay QR',
+                            style: TextStyle(fontSize: 13,
+                                fontWeight: FontWeight.w700, color: _green)),
+                      ])),
+              ),
+            ),
+          ]),
+        ),
 
         const SizedBox(height: 32),
       ]),
@@ -805,9 +981,8 @@ class _ErrorWidget extends StatelessWidget {
         padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
           color: Colors.white, borderRadius: BorderRadius.circular(24),
-          boxShadow: [BoxShadow(
-              color: Colors.red.withOpacity(0.08), blurRadius: 24,
-              offset: const Offset(0, 8))],
+          boxShadow: [BoxShadow(color: Colors.red.withOpacity(0.08),
+              blurRadius: 24, offset: const Offset(0, 8))],
         ),
         child: Column(children: [
           Container(width: 80, height: 80,
@@ -821,9 +996,11 @@ class _ErrorWidget extends StatelessWidget {
                   color: Color(0xFFE53935))),
           const SizedBox(height: 8),
           Text(message, textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade600, height: 1.5)),
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade600,
+                  height: 1.5)),
           const SizedBox(height: 24),
-          _GreenButton(label: 'Try Again', icon: Icons.refresh_rounded, onTap: onRetry),
+          _GreenButton(label: 'Try Again',
+              icon: Icons.refresh_rounded, onTap: onRetry),
         ]),
       ),
     ],
@@ -845,8 +1022,8 @@ class _DoneRow extends StatelessWidget {
         style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
     Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-      decoration: BoxDecoration(
-          color: const Color(0xFFE8F5E9), borderRadius: BorderRadius.circular(8)),
+      decoration: BoxDecoration(color: const Color(0xFFE8F5E9),
+          borderRadius: BorderRadius.circular(8)),
       child: Text(value,
           style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
               color: _green)),
@@ -886,8 +1063,9 @@ class _ScanStepIndicator extends StatelessWidget {
                     : isActive ? _green : Colors.grey.shade400),
           ),
           const SizedBox(height: 4),
-          Text(labels[i], style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-              color: isActive ? _green : Colors.grey.shade400)),
+          Text(labels[i],
+              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                  color: isActive ? _green : Colors.grey.shade400)),
         ]),
         if (i < 2) Container(width: 32, height: 2,
             margin: const EdgeInsets.only(bottom: 20),
