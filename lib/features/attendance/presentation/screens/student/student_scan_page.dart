@@ -53,20 +53,33 @@ class _StudentScanPageState extends State<StudentScanPage> {
   });
 
   // ── Get current GPS position ──────────────────────────────────────────────
-  Future<Position?> _getPosition() async {
+  // Returns null with a reason string so the UI can show the real problem.
+  Future<({Position? position, String? error})> _getPosition() async {
     try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        return (position: null, error: 'Location services are disabled. Please enable GPS.');
+      }
+
       LocationPermission perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied) {
         perm = await Geolocator.requestPermission();
       }
-      if (perm == LocationPermission.deniedForever ||
-          perm == LocationPermission.denied) return null;
+      if (perm == LocationPermission.deniedForever) {
+        return (position: null, error: 'Location permission permanently denied. Please enable it in app settings.');
+      }
+      if (perm == LocationPermission.denied) {
+        return (position: null, error: 'Location permission denied. Please allow location access.');
+      }
 
-      return await Geolocator.getCurrentPosition(
+      final pos = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
-      );
-    } catch (_) {
-      return null;
+      ).timeout(const Duration(seconds: 15), onTimeout: () =>
+          throw Exception('Location timed out. Move to an area with better GPS signal.'));
+
+      return (position: pos, error: null);
+    } catch (e) {
+      return (position: null, error: e.toString().replaceAll('Exception: ', ''));
     }
   }
 
@@ -146,15 +159,19 @@ class _StudentScanPageState extends State<StudentScanPage> {
   Future<void> _submitAttendance() async {
     if (_qrPayload == null) return;
 
-    // Get location — required by the geofence check on the backend
-    final position = await _getPosition();
+    final (:position, :error) = await _getPosition();
+    // GPS failure is non-blocking if the session has no geofence set.
+    // The backend will accept null lat/lon when no geofence is configured.
+    // If a geofence IS set the backend will reject the request with a clear message.
     if (position == null) {
-      setState(() {
-        _errorMsg   = 'Could not get your location. Please enable GPS and try again.';
-        _processing = false;
-        _step       = 5;
-      });
-      return;
+      // Show a warning snackbar but continue — let the backend decide
+      if (mounted && error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('⚠️ GPS unavailable: $error'),
+          backgroundColor: const Color(0xFFF57C00),
+          duration: const Duration(seconds: 3),
+        ));
+      }
     }
     _lastPosition = position;
 
@@ -162,8 +179,8 @@ class _StudentScanPageState extends State<StudentScanPage> {
       'qrPayload':       _qrPayload!,
       'biometricPassed': _bioPassed,
       'faceConfidence':  _faceScore,
-      'latitude':        position.latitude,
-      'longitude':       position.longitude,
+      if (position != null) 'latitude':  position.latitude,
+      if (position != null) 'longitude': position.longitude,
     });
 
     if (!mounted) return;
@@ -172,14 +189,6 @@ class _StudentScanPageState extends State<StudentScanPage> {
       final candlelight = result.data?['candlelight'] as Map<String, dynamic>?;
       final relay       = candlelight?['relayQrPayload'] as String?;
 
-      // Extract sessionId from the qrPayload so we can request more relay tokens
-      try {
-        final parsed = jsonDecode(_qrPayload!) as Map<String, dynamic>;
-        // The session _id isn't in the QR payload but the attendance response has it
-        _sessionId = result.data?['attendanceId'] as String?; // used as ref below
-      } catch (_) {}
-
-      // Store sessionId properly from backend if provided
       final sessionIdFromResult = result.data?['sessionId'] as String?;
       if (sessionIdFromResult != null) _sessionId = sessionIdFromResult;
 
@@ -208,11 +217,11 @@ class _StudentScanPageState extends State<StudentScanPage> {
     if (_sessionId == null && _attendanceResult == null) return;
     setState(() => _requestingRelay = true);
 
-    final position = await _getPosition();
+    final (:position, :error) = await _getPosition();
     if (position == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Could not get your location. Please enable GPS.'),
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(error ?? 'Could not get your location. Please enable GPS.'),
           backgroundColor: Colors.red,
         ));
         setState(() => _requestingRelay = false);
@@ -220,15 +229,8 @@ class _StudentScanPageState extends State<StudentScanPage> {
       return;
     }
 
-    // Derive sessionId — stored in attendance result or parsed from QR
-    String? sid = _sessionId;
-    if (sid == null && _qrPayload != null) {
-      try {
-        // We don't have sessionId in QR but we pass attendanceId as proxy
-        // The backend endpoint accepts sessionId — so we need it from the result
-        sid = (_attendanceResult?['sessionId'] ?? _attendanceResult?['attendanceId']) as String?;
-      } catch (_) {}
-    }
+    String? sid = _sessionId
+        ?? (_attendanceResult?['sessionId'] ?? _attendanceResult?['attendanceId']) as String?;
 
     if (sid == null) {
       setState(() => _requestingRelay = false);

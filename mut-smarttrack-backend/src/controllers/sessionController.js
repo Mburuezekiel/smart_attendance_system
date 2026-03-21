@@ -19,17 +19,18 @@ const distanceMeters = (lat1, lon1, lat2, lon2) => {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 };
 
-
-// Then in isInsideGeofence:
+// ── Check whether a coordinate is inside a session's geofence ─────────────────
 const isInsideGeofence = (session, latitude, longitude) => {
   const { geofence } = session;
+  // If lecturer never set a geofence centre, skip the check
   if (!geofence?.latitude || !geofence?.longitude) return true;
-  const dist = Session.distanceMeters(     // ← use the model static
+  const dist = distanceMeters(
     latitude, longitude,
     geofence.latitude, geofence.longitude
   );
-  return dist <= (geofence.radiusMeters ?? 50);
+  return dist <= (geofence.radiusMeters ?? DEFAULT_RADIUS_M);
 };
+
 // ── HMAC helpers ──────────────────────────────────────────────────────────────
 const secret = () => process.env.SIGNATURE_SECRET || 'change_this_in_production';
 
@@ -234,16 +235,23 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'QR code has expired.' });
     }
 
-    // ── 4. GEOFENCE CHECK — student must be inside the classroom ──────────────
-    if (latitude == null || longitude == null) {
-      return res.status(400).json({
-        message: 'Location is required to mark attendance.',
-      });
-    }
-    if (!isInsideGeofence(session, latitude, longitude)) {
-      return res.status(403).json({
-        message: 'You must be inside the classroom to mark attendance.',
-      });
+    // ── 4. GEOFENCE CHECK — only enforced if lecturer set a geofence centre ──
+    // If geofence.latitude is null the session has no boundary set — allow
+    // attendance without location (covers offline / indoor GPS-weak scenarios).
+    const hasGeofence = session.geofence?.latitude != null &&
+                        session.geofence?.longitude != null;
+
+    if (hasGeofence) {
+      if (latitude == null || longitude == null) {
+        return res.status(400).json({
+          message: 'Location is required for this session. Please enable GPS.',
+        });
+      }
+      if (!isInsideGeofence(session, latitude, longitude)) {
+        return res.status(403).json({
+          message: 'You must be inside the classroom to mark attendance.',
+        });
+      }
     }
 
     // ── 5. RELAY CHAIN VALIDATION ─────────────────────────────────────────────
@@ -410,8 +418,10 @@ export const requestRelayToken = async (req, res) => {
       return res.status(400).json({ message: 'Session is no longer active.' });
     }
 
-    // ── Geofence check ────────────────────────────────────────────────────────
-    if (!isInsideGeofence(session, latitude, longitude)) {
+    // ── Geofence check — only if session has a boundary configured ───────────
+    const hasGeofence = session.geofence?.latitude != null &&
+                        session.geofence?.longitude != null;
+    if (hasGeofence && !isInsideGeofence(session, latitude, longitude)) {
       return res.status(403).json({
         message: 'You must be inside the classroom to generate a relay QR.',
       });
