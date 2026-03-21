@@ -6,16 +6,27 @@ import Attendance from '../models/Attendance.js';
 
 const SESSION_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 
-// ── Helper: generate HMAC digital signature ──────────────────────────────────
+// ── Helper: HMAC digital signature ───────────────────────────────────────────
 const generateSignature = (studentId, sessionId, timestamp) => {
   const secret = process.env.SIGNATURE_SECRET || 'change_this_in_production';
-  return crypto
-    .createHmac('sha256', secret)
+  return crypto.createHmac('sha256', secret)
     .update(`${studentId}:${sessionId}:${timestamp}`)
     .digest('hex');
 };
 
-// ── POST /api/sessions  (Lecturer only) ──────────────────────────────────────
+// ── Helper: single-use CANDLELIGHT relay token ────────────────────────────────
+// Chained to the verified student's attendanceId so the backend can trace
+// exactly who passed the chain to whom.
+const generateRelayToken = (attendanceId, studentId, sessionId) => {
+  const secret = process.env.SIGNATURE_SECRET || 'change_this_in_production';
+  return crypto.createHmac('sha256', secret)
+    .update(`relay:${attendanceId}:${studentId}:${sessionId}`)
+    .digest('hex');
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/sessions  (Lecturer only)
+// ─────────────────────────────────────────────────────────────────────────────
 export const createSession = async (req, res) => {
   try {
     if (req.user.role !== 'lecturer') {
@@ -27,18 +38,17 @@ export const createSession = async (req, res) => {
       return res.status(400).json({ message: 'assignmentId is required.' });
     }
 
-    // Verify lecturer owns this assignment
+    const lecturerId = req.user._id ?? req.user.id;
+
     const assignment = await Assignment.findOne({
-      _id:      assignmentId,
-      lecturer: req.user._id ?? req.user.id,   // handle both token formats
-      isActive: true,
+      _id: assignmentId, lecturer: lecturerId, isActive: true,
     }).populate('unit', 'name code');
 
     if (!assignment) {
       return res.status(404).json({ message: 'Assignment not found or not yours.' });
     }
 
-    // End any currently active session for this assignment
+    // Close any currently active session for this assignment
     await Session.updateMany(
       { assignment: assignmentId, isActive: true },
       { isActive: false }
@@ -47,21 +57,20 @@ export const createSession = async (req, res) => {
     const qrToken   = Session.generateToken();
     const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
-    // ── QR payload — JSON string encoded into the QR image ───────────────────
-    // IMPORTANT: unitName and unitCode are included so the student app can
-    // display the class name immediately after scanning, without an extra API call.
+    // relay: false marks this as the original lecturer QR (not a student relay)
     const qrPayload = JSON.stringify({
       t:        qrToken,
       a:        assignmentId,
       u:        assignment.unit._id.toString(),
       exp:      expiresAt.getTime(),
-      unitName: assignment.unit.name,   // ← displayed in student app after scan
-      unitCode: assignment.unit.code,   // ← displayed in student app after scan
+      unitName: assignment.unit.name,
+      unitCode: assignment.unit.code,
+      relay:    false,
     });
 
     const session = await Session.create({
       assignment: assignmentId,
-      lecturer:   req.user._id ?? req.user.id,
+      lecturer:   lecturerId,
       unit:       assignment.unit._id,
       qrToken,
       qrPayload,
@@ -70,10 +79,10 @@ export const createSession = async (req, res) => {
     });
 
     res.status(201).json({
-      _id:        session._id,          // Flutter uses _activeSession?['_id']
+      _id:        session._id,
       sessionId:  session._id,
       message:    'Session started.',
-      qrPayload,                        // ← encode this into the QR widget
+      qrPayload,
       expiresAt,
       unitName:   assignment.unit.name,
       unitCode:   assignment.unit.code,
@@ -83,7 +92,9 @@ export const createSession = async (req, res) => {
   }
 };
 
-// ── DELETE /api/sessions/:id  (Lecturer ends session early) ──────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/sessions/:id  (Lecturer — kills the session AND all relay chains)
+// ─────────────────────────────────────────────────────────────────────────────
 export const endSession = async (req, res) => {
   try {
     if (req.user.role !== 'lecturer') {
@@ -96,13 +107,23 @@ export const endSession = async (req, res) => {
       { new: true }
     );
     if (!session) return res.status(404).json({ message: 'Session not found.' });
-    res.json({ message: 'Session ended.' });
+
+    // Burn ALL relay tokens for this session instantly
+    // Any student QR shown after this point will fail validation
+    await Attendance.updateMany(
+      { session: req.params.id },
+      { relayToken: null, relayUsed: true }
+    );
+
+    res.json({ message: 'Session ended. All relay tokens revoked.' });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
-// ── GET /api/sessions/:id/stats  (Lecturer — live scan count) ────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/sessions/:id/stats
+// ─────────────────────────────────────────────────────────────────────────────
 export const getSessionStats = async (req, res) => {
   try {
     const session = await Session.findById(req.params.id)
@@ -115,13 +136,13 @@ export const getSessionStats = async (req, res) => {
       return res.status(403).json({ message: 'Access denied.' });
     }
 
-    const scanned  = await Attendance.countDocuments({ session: req.params.id });
-    const total    = session.assignment?.students?.length ?? 0;   // renamed → total
+    const scanned = await Attendance.countDocuments({ session: req.params.id });
+    const total   = session.assignment?.students?.length ?? 0;
 
     res.json({
       scanned,
-      total,                                       // Flutter polls _total
-      expected:  total,                            // keep for compatibility
+      total,
+      expected:  total,
       remaining: Math.max(0, total - scanned),
       isActive:  session.isActive,
       expiresAt: session.expiresAt,
@@ -131,8 +152,27 @@ export const getSessionStats = async (req, res) => {
   }
 };
 
-// ── POST /api/sessions/verify  (Student — full verification chain) ────────────
-// Body: { qrPayload, biometricPassed, faceConfidence }
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/sessions/verify  (Student marks attendance)
+//
+// ╔══════════════ CANDLELIGHT ALGORITHM ══════════════╗
+// ║                                                   ║
+// ║  Lecturer generates original QR (relay: false)    ║
+// ║       ↓                                           ║
+// ║  Student A scans → signs → gets relayQrPayload    ║
+// ║       ↓  (relayToken burned on Student B's scan)  ║
+// ║  Student B scans A's QR → signs → gets own relay  ║
+// ║       ↓                                           ║
+// ║  ...chain continues...                            ║
+// ║       ↓                                           ║
+// ║  Lecturer ends session → ALL relay tokens nuked   ║
+// ║  No further QRs work regardless of who holds them ║
+// ╚═══════════════════════════════════════════════════╝
+//
+// Anti-screenshot: relay tokens are single-use and burned immediately.
+// Anti-fraud: each relay is tied to a real verified attendance record.
+// Anti-loophole: session.isActive is checked on EVERY scan.
+// ─────────────────────────────────────────────────────────────────────────────
 export const verifyAndMarkAttendance = async (req, res) => {
   try {
     if (req.user.role !== 'student') {
@@ -144,37 +184,62 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'qrPayload is required.' });
     }
 
-    // ── 1. Parse and validate QR payload ─────────────────────────────────────
+    // ── 1. Parse QR payload ───────────────────────────────────────────────────
     let parsed;
-    try {
-      parsed = JSON.parse(qrPayload);
-    } catch {
-      return res.status(400).json({ message: 'Invalid QR code.' });
-    }
+    try { parsed = JSON.parse(qrPayload); }
+    catch { return res.status(400).json({ message: 'Invalid QR code.' }); }
 
-    const { t: qrToken, a: assignmentId, exp } = parsed;
+    const { t: qrToken, a: assignmentId, exp, relay, relayToken } = parsed;
     if (!qrToken || !assignmentId) {
       return res.status(400).json({ message: 'Malformed QR code.' });
     }
 
-    // ── 2. Check expiry ───────────────────────────────────────────────────────
+    // ── 2. Expiry check ───────────────────────────────────────────────────────
     if (Date.now() > exp) {
       return res.status(400).json({
-        message: 'QR code has expired. Ask your lecturer to generate a new one.',
+        message: 'QR code has expired. Ask your lecturer for a new one.',
       });
     }
 
     // ── 3. Find active session ────────────────────────────────────────────────
     const session = await Session.findOne({ qrToken, isActive: true });
     if (!session) {
-      return res.status(400).json({ message: 'Session not found or already closed.' });
+      return res.status(400).json({
+        message: 'Session not found or the lecturer has already ended it.',
+      });
     }
     if (new Date() > session.expiresAt) {
       await Session.findByIdAndUpdate(session._id, { isActive: false });
       return res.status(400).json({ message: 'QR code has expired.' });
     }
 
-    // ── 4. Verify student is enrolled ─────────────────────────────────────────
+    // ── 4. RELAY CHAIN VALIDATION ─────────────────────────────────────────────
+    if (relay === true) {
+      if (!relayToken) {
+        return res.status(400).json({ message: 'Relay QR is missing its token.' });
+      }
+
+      // Find the attendance record that owns this relay token
+      const relaySource = await Attendance.findOne({
+        session:    session._id,
+        relayToken: relayToken,
+        relayUsed:  false,     // must not have been used yet
+      });
+
+      if (!relaySource) {
+        return res.status(400).json({
+          message: 'This relay QR has already been used or the session ended. Ask a different classmate.',
+        });
+      }
+
+      // BURN immediately — one-time use enforced at the DB level
+      await Attendance.findByIdAndUpdate(relaySource._id, {
+        relayToken: null,
+        relayUsed:  true,
+      });
+    }
+
+    // ── 5. Enrolment check ────────────────────────────────────────────────────
     const assignment = await Assignment.findById(assignmentId);
     if (!assignment) {
       return res.status(404).json({ message: 'Assignment not found.' });
@@ -185,10 +250,9 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(403).json({ message: 'You are not enrolled in this unit.' });
     }
 
-    // ── 5. Prevent duplicate attendance ──────────────────────────────────────
+    // ── 6. Duplicate check ────────────────────────────────────────────────────
     const existing = await Attendance.findOne({
-      session: session._id,
-      student: studentId,
+      session: session._id, student: studentId,
     });
     if (existing) {
       return res.status(400).json({
@@ -196,22 +260,24 @@ export const verifyAndMarkAttendance = async (req, res) => {
       });
     }
 
-    // ── 6. Validate biometric checks ──────────────────────────────────────────
+    // ── 7. Biometric checks ───────────────────────────────────────────────────
     if (!biometricPassed) {
       return res.status(400).json({ message: 'Biometric verification failed.' });
     }
     const faceScore = parseFloat(faceConfidence) || 0;
     if (faceScore < 0.75) {
       return res.status(400).json({
-        message: `Face verification failed (confidence: ${(faceScore * 100).toFixed(0)}%). Try better lighting.`,
+        message: `Face verification failed (${(faceScore * 100).toFixed(0)}% confidence). Try better lighting.`,
       });
     }
 
-    // ── 7. Generate digital signature ─────────────────────────────────────────
+    // ── 8. Digital signature ──────────────────────────────────────────────────
     const timestamp        = Date.now();
-    const digitalSignature = generateSignature(studentId, session._id.toString(), timestamp);
+    const digitalSignature = generateSignature(
+      studentId, session._id.toString(), timestamp
+    );
 
-    // ── 8. Write attendance record ────────────────────────────────────────────
+    // ── 9. Write attendance + issue relay token ───────────────────────────────
     const attendance = await Attendance.create({
       session:           session._id,
       assignment:        assignment._id,
@@ -225,6 +291,32 @@ export const verifyAndMarkAttendance = async (req, res) => {
       digitalSignature,
       signedAt:          new Date(timestamp),
       status:            'present',
+      // Candlelight fields
+      relayToken:  'pending',   // placeholder — replaced below with real token
+      relayUsed:   false,
+      chainDepth:  relay === true ? (parsed.chainDepth ?? 0) + 1 : 1,
+    });
+
+    // Generate the final relay token now that we have the real attendanceId
+    const finalRelayToken = generateRelayToken(
+      attendance._id.toString(), studentId, session._id.toString()
+    );
+    await Attendance.findByIdAndUpdate(attendance._id, { relayToken: finalRelayToken });
+
+    // ── 10. Build the relay QR payload for this student ───────────────────────
+    // The student's app will encode this string into a QR they can show
+    // to classmates. It carries the same session qrToken (session still
+    // active) plus their unique single-use relayToken.
+    const relayQrPayload = JSON.stringify({
+      t:          qrToken,
+      a:          assignmentId,
+      u:          session.unit.toString(),
+      exp:        session.expiresAt.getTime(),
+      unitName:   parsed.unitName ?? '',
+      unitCode:   parsed.unitCode ?? '',
+      relay:      true,
+      relayToken: finalRelayToken,
+      chainDepth: attendance.chainDepth,
     });
 
     res.status(201).json({
@@ -238,13 +330,19 @@ export const verifyAndMarkAttendance = async (req, res) => {
         face:      true,
         faceScore: `${(faceScore * 100).toFixed(0)}%`,
       },
+      candlelight: {
+        relayQrPayload,
+        chainDepth: attendance.chainDepth,
+      },
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
-// ── GET /api/sessions/my-attendance  (Student — attendance history) ───────────
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/sessions/my-attendance  (Student history)
+// ─────────────────────────────────────────────────────────────────────────────
 export const getMyAttendance = async (req, res) => {
   try {
     if (req.user.role !== 'student') {

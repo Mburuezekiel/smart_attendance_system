@@ -5,16 +5,16 @@
 //   local_auth: ^2.3.0
 //   google_mlkit_face_detection: ^0.11.0
 //   camera: ^0.11.0
-//   crypto: ^3.0.3
+//   qr_flutter: ^4.1.0
 
 import 'dart:convert';
 import 'dart:io';
 import 'package:camera/camera.dart';
-import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import '../../../../../../../core/services/api_service.dart';
 
 class StudentScanPage extends StatefulWidget {
@@ -25,52 +25,52 @@ class StudentScanPage extends StatefulWidget {
 
 class _StudentScanPageState extends State<StudentScanPage> {
   // 0=qr  1=qr_success  2=biometric  3=face  4=done  5=error
-  int     _step           = 0;
-  String? _qrPayload;      // full raw JSON string from QR — sent to /sessions/verify
+  int     _step       = 0;
+  String? _qrPayload;
   String? _className;
   String? _unitCode;
-  bool    _bioPassed      = false;
-  double  _faceScore      = 0.0;
+  bool    _bioPassed  = false;
+  double  _faceScore  = 0.0;
   String? _errorMsg;
-  bool    _processing     = false;
+  bool    _processing = false;
   Map<String, dynamic>? _attendanceResult;
+
+  // Candlelight — relay QR issued after successful sign
+  String? _relayQrPayload;
 
   static const _green = Color(0xFF2E7D32);
 
   void _reset() => setState(() {
     _step = 0; _qrPayload = null; _className = null; _unitCode = null;
-    _bioPassed = false; _faceScore = 0.0;
-    _errorMsg = null; _processing = false; _attendanceResult = null;
+    _bioPassed = false; _faceScore = 0.0; _errorMsg = null;
+    _processing = false; _attendanceResult = null; _relayQrPayload = null;
   });
 
-  // ── Step 0 → 1: QR scanned ────────────────────────────────────────────────
-  // Backend encodes this JSON into the QR:
-  //   { t, a, u, exp, unitName, unitCode }
+  // ── Step 0 → 1 ────────────────────────────────────────────────────────────
   void _onQrDetected(String rawPayload) {
     try {
-      final parsed   = jsonDecode(rawPayload) as Map<String, dynamic>;
-      final qrToken  = parsed['t'] as String?;   // ← backend key is 't' not 'token'
+      final parsed  = jsonDecode(rawPayload) as Map<String, dynamic>;
+      final qrToken = parsed['t'] as String?;
       if (qrToken == null || qrToken.isEmpty) throw Exception('Missing token');
 
-      // Check client-side expiry before even proceeding
       final exp = parsed['exp'] as int?;
       if (exp != null && DateTime.now().millisecondsSinceEpoch > exp) {
         setState(() {
-          _errorMsg = 'This QR code has expired. Ask your lecturer to generate a new one.';
-          _step     = 5;
+          _errorMsg = 'This QR code has expired. Ask your lecturer or a classmate for a new one.';
+          _step = 5;
         });
         return;
       }
 
       setState(() {
-        _qrPayload = rawPayload;                                   // full JSON → sent to backend
+        _qrPayload = rawPayload;
         _className = parsed['unitName'] as String? ?? 'Class Session';
         _unitCode  = parsed['unitCode'] as String? ?? '';
         _step      = 1;
       });
     } catch (_) {
       setState(() {
-        _errorMsg = 'Invalid QR code. Use the QR shown by your lecturer.';
+        _errorMsg = 'Invalid QR code. Use the QR shown by your lecturer or a verified classmate.';
         _step     = 5;
       });
     }
@@ -85,7 +85,6 @@ class _StudentScanPageState extends State<StudentScanPage> {
       final supported = await auth.isDeviceSupported();
 
       if (!canCheck && !supported) {
-        // Device has no biometrics — skip gracefully, mark as not passed
         if (mounted) setState(() { _processing = false; _bioPassed = false; _step = 3; });
         return;
       }
@@ -105,38 +104,37 @@ class _StudentScanPageState extends State<StudentScanPage> {
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _processing = false;
-          _errorMsg   = 'Biometric error: ${e.toString()}';
-          _step       = 5;
-        });
-      }
+      if (mounted) setState(() {
+        _processing = false;
+        _errorMsg   = 'Biometric error: ${e.toString()}';
+        _step       = 5;
+      });
     }
   }
 
-  // ── Step 3 → 4: Face verified, then submit ────────────────────────────────
+  // ── Step 3 → 4 ────────────────────────────────────────────────────────────
   Future<void> _onFaceVerified(double confidence) async {
     setState(() { _faceScore = confidence; _processing = true; _step = 4; });
     await _submitAttendance();
   }
 
-  // ── Submit attendance to backend ──────────────────────────────────────────
-  // Calls POST /api/sessions/verify with:
-  //   { qrPayload (full JSON string), biometricPassed, faceConfidence }
+  // ── Submit ────────────────────────────────────────────────────────────────
   Future<void> _submitAttendance() async {
     if (_qrPayload == null) return;
 
     final result = await ApiService().post('/sessions/verify', {
-      'qrPayload':       _qrPayload!,   // full JSON string the backend will re-parse
+      'qrPayload':       _qrPayload!,
       'biometricPassed': _bioPassed,
       'faceConfidence':  _faceScore,
     });
 
     if (!mounted) return;
     if (result.success) {
-      // Build a local signature preview from the response
       final sig = result.data?['digitalSignature'] as String? ?? '';
+      // Extract the relay QR payload issued by the backend (candlelight)
+      final candlelight = result.data?['candlelight'] as Map<String, dynamic>?;
+      final relay       = candlelight?['relayQrPayload'] as String?;
+
       setState(() {
         _attendanceResult = {
           ...?result.data,
@@ -145,7 +143,8 @@ class _StudentScanPageState extends State<StudentScanPage> {
             'faceScore': '${(_faceScore * 100).toStringAsFixed(0)}%',
           },
         };
-        _processing = false;
+        _relayQrPayload = relay;
+        _processing     = false;
       });
     } else {
       setState(() {
@@ -192,12 +191,13 @@ class _StudentScanPageState extends State<StudentScanPage> {
       2 => _BiometricWidget(processing: _processing, onScan: _doFingerprint),
       3 => _FaceWidget(onVerified: _onFaceVerified),
       4 => _DoneWidget(
-            className:  _className ?? '',
-            unitCode:   _unitCode  ?? '',
-            result:     _attendanceResult,
-            processing: _processing,
-            faceScore:  _faceScore,
-            onReset:    _reset,
+            className:       _className ?? '',
+            unitCode:        _unitCode  ?? '',
+            result:          _attendanceResult,
+            processing:      _processing,
+            faceScore:       _faceScore,
+            relayQrPayload:  _relayQrPayload,
+            onReset:         _reset,
           ),
       5 => _ErrorWidget(message: _errorMsg ?? 'Something went wrong.', onRetry: _reset),
       _ => const SizedBox.shrink(),
@@ -206,14 +206,13 @@ class _StudentScanPageState extends State<StudentScanPage> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 0 — QR Scanner (mobile_scanner)
+// STEP 0 — QR Scanner
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _QrScanStep extends StatefulWidget {
   final ValueChanged<String> onDetected;
   const _QrScanStep({required this.onDetected});
-  @override
-  State<_QrScanStep> createState() => _QrScanStepState();
+  @override State<_QrScanStep> createState() => _QrScanStepState();
 }
 
 class _QrScanStepState extends State<_QrScanStep> {
@@ -240,8 +239,7 @@ class _QrScanStepState extends State<_QrScanStep> {
         Container(
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(24),
+            color: Colors.white, borderRadius: BorderRadius.circular(24),
             boxShadow: [BoxShadow(
                 color: _green.withOpacity(0.08), blurRadius: 24,
                 offset: const Offset(0, 8))],
@@ -256,7 +254,7 @@ class _QrScanStepState extends State<_QrScanStep> {
                 ),
               ),
               const SizedBox(height: 12),
-              Text('Point at the QR code on the lecturer\'s screen',
+              Text('Scan lecturer QR or a verified classmate\'s QR',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
               const SizedBox(height: 16),
@@ -281,7 +279,7 @@ class _QrScanStepState extends State<_QrScanStep> {
                   style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
                       color: Color(0xFF1B1B1B))),
               const SizedBox(height: 8),
-              Text('Point your camera at the QR code displayed by your lecturer',
+              Text('Scan the lecturer\'s QR code, or a verified classmate\'s relay QR',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 13, color: Colors.grey.shade500, height: 1.5)),
               const SizedBox(height: 24),
@@ -299,7 +297,7 @@ class _QrScanStepState extends State<_QrScanStep> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 1 — QR success confirmation
+// STEP 1 — QR success
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _QrSuccessWidget extends StatelessWidget {
@@ -320,27 +318,22 @@ class _QrSuccessWidget extends StatelessWidget {
         padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
           color: Colors.white, borderRadius: BorderRadius.circular(24),
-          boxShadow: [BoxShadow(
-              color: _green.withOpacity(0.08), blurRadius: 24,
-              offset: const Offset(0, 8))],
+          boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+              blurRadius: 24, offset: const Offset(0, 8))],
         ),
         child: Column(children: [
-          Container(
-            width: 80, height: 80,
-            decoration: const BoxDecoration(
-                shape: BoxShape.circle, color: Color(0xFFE8F5E9)),
-            child: const Icon(Icons.check_circle_rounded, color: _green, size: 46),
-          ),
+          Container(width: 80, height: 80,
+              decoration: const BoxDecoration(
+                  shape: BoxShape.circle, color: Color(0xFFE8F5E9)),
+              child: const Icon(Icons.check_circle_rounded, color: _green, size: 46)),
           const SizedBox(height: 16),
           const Text('QR Verified!',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
-                  color: _green)),
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _green)),
           if (unitCode.isNotEmpty) ...[
             const SizedBox(height: 8),
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                  color: _green, borderRadius: BorderRadius.circular(8)),
+              decoration: BoxDecoration(color: _green, borderRadius: BorderRadius.circular(8)),
               child: Text(unitCode,
                   style: const TextStyle(color: Colors.white, fontSize: 11,
                       fontWeight: FontWeight.w800)),
@@ -366,7 +359,7 @@ class _QrSuccessWidget extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 2 — Biometric via local_auth
+// STEP 2 — Biometric
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _BiometricWidget extends StatelessWidget {
@@ -386,9 +379,8 @@ class _BiometricWidget extends StatelessWidget {
         padding: const EdgeInsets.all(28),
         decoration: BoxDecoration(
           color: Colors.white, borderRadius: BorderRadius.circular(24),
-          boxShadow: [BoxShadow(
-              color: _green.withOpacity(0.08), blurRadius: 24,
-              offset: const Offset(0, 8))],
+          boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+              blurRadius: 24, offset: const Offset(0, 8))],
         ),
         child: Column(children: [
           AnimatedContainer(
@@ -404,11 +396,9 @@ class _BiometricWidget extends StatelessWidget {
                 color: processing ? _green : Colors.grey.shade400),
           ),
           const SizedBox(height: 20),
-          Text(
-            processing ? 'Verifying…' : 'Step 2: Device Biometrics',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
-                color: processing ? _green : const Color(0xFF1B1B1B)),
-          ),
+          Text(processing ? 'Verifying…' : 'Step 2: Device Biometrics',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
+                  color: processing ? _green : const Color(0xFF1B1B1B))),
           const SizedBox(height: 8),
           Text(
             processing
@@ -424,11 +414,9 @@ class _BiometricWidget extends StatelessWidget {
                 icon: Icons.fingerprint_rounded,
                 onTap: onScan)
           else
-            const SizedBox(
-              height: 52,
-              child: Center(
-                  child: CircularProgressIndicator(color: _green, strokeWidth: 2.5)),
-            ),
+            const SizedBox(height: 52,
+                child: Center(child: CircularProgressIndicator(
+                    color: _green, strokeWidth: 2.5))),
         ]),
       ),
     ],
@@ -436,19 +424,17 @@ class _BiometricWidget extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 3 — Face detection (camera + google_mlkit_face_detection)
+// STEP 3 — Face detection
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _FaceWidget extends StatefulWidget {
   final void Function(double confidence) onVerified;
   const _FaceWidget({required this.onVerified});
-  @override
-  State<_FaceWidget> createState() => _FaceWidgetState();
+  @override State<_FaceWidget> createState() => _FaceWidgetState();
 }
 
 class _FaceWidgetState extends State<_FaceWidget> {
   static const _green = Color(0xFF2E7D32);
-
   CameraController? _cam;
   bool   _cameraReady = false;
   bool   _scanning    = false;
@@ -462,21 +448,16 @@ class _FaceWidgetState extends State<_FaceWidget> {
     ),
   );
 
-  @override
-  void initState() { super.initState(); _initCamera(); }
+  @override void initState() { super.initState(); _initCamera(); }
 
   @override
-  void dispose() {
-    _cam?.dispose();
-    _faceDetector.close();
-    super.dispose();
-  }
+  void dispose() { _cam?.dispose(); _faceDetector.close(); super.dispose(); }
 
   Future<void> _initCamera() async {
     try {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
-        if (mounted) setState(() => _status = 'No camera found on this device.');
+        if (mounted) setState(() => _status = 'No camera found.');
         return;
       }
       final front = cameras.firstWhere(
@@ -494,25 +475,20 @@ class _FaceWidgetState extends State<_FaceWidget> {
   Future<void> _detectFace() async {
     if (_scanning || _cam == null || !_cam!.value.isInitialized) return;
     setState(() { _scanning = true; _status = 'Detecting face…'; });
-
     try {
       final xFile     = await _cam!.takePicture();
-      final inputImage = InputImage.fromFilePath(xFile.path);
-      final faces     = await _faceDetector.processImage(inputImage);
-
+      final inputImg  = InputImage.fromFilePath(xFile.path);
+      final faces     = await _faceDetector.processImage(inputImg);
       try { File(xFile.path).deleteSync(); } catch (_) {}
-
       if (!mounted) return;
 
       if (faces.isEmpty) {
-        setState(() { _scanning = false; _status = 'No face detected. Move closer and try again.'; });
+        setState(() { _scanning = false; _status = 'No face detected. Move closer.'; });
         return;
       }
-
       final face       = faces.first;
-      final leftEye    = face.leftEyeOpenProbability  ?? 0.0;
-      final rightEye   = face.rightEyeOpenProbability ?? 0.0;
-      final confidence = (leftEye + rightEye) / 2.0;
+      final confidence = ((face.leftEyeOpenProbability ?? 0.0) +
+                          (face.rightEyeOpenProbability ?? 0.0)) / 2.0;
 
       if (confidence >= 0.75) {
         setState(() { _scanning = false; _status = 'Face verified! ✓'; });
@@ -521,94 +497,89 @@ class _FaceWidgetState extends State<_FaceWidget> {
       } else {
         setState(() {
           _scanning = false;
-          _status   = 'Liveness check failed. Open both eyes fully and look straight ahead.';
+          _status   = 'Liveness check failed. Open both eyes and look straight ahead.';
         });
       }
     } catch (e) {
-      if (mounted) setState(() { _scanning = false; _status = 'Detection error. Tap Verify Face to try again.'; });
+      if (mounted) setState(() {
+        _scanning = false; _status = 'Detection error. Tap Verify Face to retry.';
+      });
     }
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _ScanStepIndicator(current: 2),
-        const SizedBox(height: 32),
-        Container(
-          padding: const EdgeInsets.all(24),
-          decoration: BoxDecoration(
-            color: Colors.white, borderRadius: BorderRadius.circular(24),
-            boxShadow: [BoxShadow(
-                color: _green.withOpacity(0.08), blurRadius: 24,
-                offset: const Offset(0, 8))],
-          ),
-          child: Column(children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: SizedBox(
-                height: 220, width: 220,
-                child: _cameraReady && _cam != null
-                    ? CameraPreview(_cam!)
-                    : Container(
-                        color: const Color(0xFFE8F5E9),
-                        child: const Center(
-                          child: CircularProgressIndicator(color: _green, strokeWidth: 2),
-                        ),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text('Step 3: Face Verification',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800,
-                    color: Color(0xFF1B1B1B))),
-            const SizedBox(height: 8),
-            Text(_status, textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 13, color: Colors.grey.shade500, height: 1.5)),
-            const SizedBox(height: 10),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                  color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(10)),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.light_mode_outlined, color: Color(0xFFF57C00), size: 14),
-                const SizedBox(width: 6),
-                Text('Face the light source for best results',
-                    style: TextStyle(fontSize: 11, color: Colors.orange.shade700,
-                        fontWeight: FontWeight.w600)),
-              ]),
-            ),
-            const SizedBox(height: 20),
-            if (!_scanning)
-              _GreenButton(
-                label: _cameraReady ? 'Verify Face' : 'Starting camera…',
-                icon: Icons.camera_front_rounded,
-                onTap: _cameraReady ? _detectFace : () {},
-              )
-            else
-              const SizedBox(
-                height: 52,
-                child: Center(
-                    child: CircularProgressIndicator(color: _green, strokeWidth: 2.5)),
-              ),
-          ]),
+  Widget build(BuildContext context) => Column(
+    mainAxisAlignment: MainAxisAlignment.center,
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      _ScanStepIndicator(current: 2),
+      const SizedBox(height: 32),
+      Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.white, borderRadius: BorderRadius.circular(24),
+          boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+              blurRadius: 24, offset: const Offset(0, 8))],
         ),
-      ],
-    );
-  }
+        child: Column(children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: SizedBox(
+              height: 220, width: 220,
+              child: _cameraReady && _cam != null
+                  ? CameraPreview(_cam!)
+                  : Container(color: const Color(0xFFE8F5E9),
+                      child: const Center(child: CircularProgressIndicator(
+                          color: _green, strokeWidth: 2))),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text('Step 3: Face Verification',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800,
+                  color: Color(0xFF1B1B1B))),
+          const SizedBox(height: 8),
+          Text(_status, textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade500, height: 1.5)),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+                color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(10)),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.light_mode_outlined, color: Color(0xFFF57C00), size: 14),
+              const SizedBox(width: 6),
+              Text('Face the light source for best results',
+                  style: TextStyle(fontSize: 11, color: Colors.orange.shade700,
+                      fontWeight: FontWeight.w600)),
+            ]),
+          ),
+          const SizedBox(height: 20),
+          if (!_scanning)
+            _GreenButton(
+              label: _cameraReady ? 'Verify Face' : 'Starting camera…',
+              icon: Icons.camera_front_rounded,
+              onTap: _cameraReady ? _detectFace : () {},
+            )
+          else
+            const SizedBox(height: 52,
+                child: Center(child: CircularProgressIndicator(
+                    color: _green, strokeWidth: 2.5))),
+        ]),
+      ),
+    ],
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STEP 4 — Done
+// STEP 4 — Done + CANDLELIGHT relay QR
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _DoneWidget extends StatelessWidget {
-  final String className, unitCode;
+  final String   className, unitCode;
   final Map<String, dynamic>? result;
-  final bool processing;
-  final double faceScore;
+  final bool     processing;
+  final double   faceScore;
+  final String?  relayQrPayload;   // candlelight relay payload
   final VoidCallback onReset;
   static const _green = Color(0xFF2E7D32);
 
@@ -618,20 +589,19 @@ class _DoneWidget extends StatelessWidget {
     required this.result,
     required this.processing,
     required this.faceScore,
+    required this.relayQrPayload,
     required this.onReset,
   });
 
   @override
   Widget build(BuildContext context) {
     if (processing) {
-      return const Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          CircularProgressIndicator(color: _green, strokeWidth: 2.5),
-          SizedBox(height: 16),
-          Text('Submitting attendance…',
-              style: TextStyle(color: _green, fontWeight: FontWeight.w600)),
-        ]),
-      );
+      return const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        CircularProgressIndicator(color: _green, strokeWidth: 2.5),
+        SizedBox(height: 16),
+        Text('Submitting attendance…',
+            style: TextStyle(color: _green, fontWeight: FontWeight.w600)),
+      ]));
     }
 
     final sig       = result?['digitalSignature'] as String? ?? '';
@@ -642,21 +612,20 @@ class _DoneWidget extends StatelessWidget {
 
     return SingleChildScrollView(
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+
+        // ── Success card ─────────────────────────────────────────────────────
         Container(
           padding: const EdgeInsets.all(28),
           decoration: BoxDecoration(
             color: Colors.white, borderRadius: BorderRadius.circular(24),
-            boxShadow: [BoxShadow(
-                color: _green.withOpacity(0.09), blurRadius: 24,
-                offset: const Offset(0, 8))],
+            boxShadow: [BoxShadow(color: _green.withOpacity(0.09),
+                blurRadius: 24, offset: const Offset(0, 8))],
           ),
           child: Column(children: [
-            Container(
-              width: 96, height: 96,
-              decoration: const BoxDecoration(
-                  shape: BoxShape.circle, color: Color(0xFFE8F5E9)),
-              child: const Icon(Icons.verified_rounded, color: _green, size: 52),
-            ),
+            Container(width: 96, height: 96,
+                decoration: const BoxDecoration(
+                    shape: BoxShape.circle, color: Color(0xFFE8F5E9)),
+                child: const Icon(Icons.verified_rounded, color: _green, size: 52)),
             const SizedBox(height: 20),
             const Text('Attendance Marked!',
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: _green)),
@@ -730,6 +699,89 @@ class _DoneWidget extends StatelessWidget {
                 onTap: onReset),
           ]),
         ),
+
+        // ── CANDLELIGHT relay QR card ─────────────────────────────────────────
+        if (relayQrPayload != null) ...[
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: _green.withOpacity(0.3), width: 1.5),
+              boxShadow: [BoxShadow(color: _green.withOpacity(0.08),
+                  blurRadius: 20, offset: const Offset(0, 6))],
+            ),
+            child: Column(children: [
+
+              // Header
+              Row(children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: _green.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10)),
+                  child: const Icon(Icons.local_fire_department_rounded,
+                      color: _green, size: 20),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Pass the Flame 🕯️',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800,
+                            color: Color(0xFF1B1B1B))),
+                    Text('Share your QR with a classmate who hasn\'t signed yet',
+                        style: TextStyle(fontSize: 11, color: Color(0xFF666666))),
+                  ]),
+                ),
+              ]),
+              const SizedBox(height: 16),
+
+              // Relay QR
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: _green, width: 2.5),
+                  borderRadius: BorderRadius.circular(16),
+                  color: Colors.white,
+                ),
+                child: QrImageView(
+                  data: relayQrPayload!,
+                  version: QrVersions.auto,
+                  size: 200,
+                  eyeStyle: const QrEyeStyle(
+                      eyeShape: QrEyeShape.square, color: _green),
+                  dataModuleStyle: const QrDataModuleStyle(
+                      dataModuleShape: QrDataModuleShape.square, color: _green),
+                ),
+              ),
+              const SizedBox(height: 14),
+
+              // Single-use warning
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                    color: const Color(0xFFFFF8E1),
+                    borderRadius: BorderRadius.circular(12)),
+                child: Row(children: [
+                  const Icon(Icons.info_outline_rounded,
+                      color: Color(0xFFF57C00), size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Single-use only — burns after one scan.\n'
+                      'QR becomes invalid when the lecturer ends the session.',
+                      style: TextStyle(fontSize: 11, color: Colors.orange.shade800,
+                          height: 1.5),
+                    ),
+                  ),
+                ]),
+              ),
+            ]),
+          ),
+        ],
+
+        const SizedBox(height: 32),
       ]),
     );
   }
@@ -758,13 +810,11 @@ class _ErrorWidget extends StatelessWidget {
               offset: const Offset(0, 8))],
         ),
         child: Column(children: [
-          Container(
-            width: 80, height: 80,
-            decoration: const BoxDecoration(
-                shape: BoxShape.circle, color: Color(0xFFFFEBEE)),
-            child: const Icon(Icons.error_rounded,
-                color: Color(0xFFE53935), size: 46),
-          ),
+          Container(width: 80, height: 80,
+              decoration: const BoxDecoration(
+                  shape: BoxShape.circle, color: Color(0xFFFFEBEE)),
+              child: const Icon(Icons.error_rounded,
+                  color: Color(0xFFE53935), size: 46)),
           const SizedBox(height: 16),
           const Text('Verification Failed',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800,
@@ -785,13 +835,10 @@ class _ErrorWidget extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _DoneRow extends StatelessWidget {
-  final IconData icon;
-  final String label, value;
+  final IconData icon; final String label, value;
   static const _green = Color(0xFF2E7D32);
   const _DoneRow(this.icon, this.label, this.value);
-
-  @override
-  Widget build(BuildContext context) => Row(children: [
+  @override Widget build(BuildContext context) => Row(children: [
     Icon(icon, size: 18, color: _green),
     const SizedBox(width: 10),
     Expanded(child: Text(label,
@@ -816,12 +863,10 @@ class _ScanStepIndicator extends StatelessWidget {
   Widget build(BuildContext context) => Row(
     mainAxisAlignment: MainAxisAlignment.center,
     children: List.generate(3, (i) {
-      final icons  = [
-        Icons.qr_code_scanner_rounded,
-        Icons.fingerprint_rounded,
-        Icons.face_retouching_natural,
-      ];
-      final labels   = ['QR Code', 'Biometrics', 'Face ID'];
+      final icons  = [Icons.qr_code_scanner_rounded,
+                      Icons.fingerprint_rounded,
+                      Icons.face_retouching_natural];
+      final labels = ['QR Code', 'Biometrics', 'Face ID'];
       final isDone   = i < current;
       final isActive = i == current;
       return Row(children: [
@@ -831,8 +876,7 @@ class _ScanStepIndicator extends StatelessWidget {
             width: 44, height: 44,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: isDone
-                  ? _green
+              color: isDone ? _green
                   : isActive ? _green.withOpacity(0.15) : Colors.grey.shade100,
               border: Border.all(
                   color: isActive ? _green : Colors.transparent, width: 2),
@@ -842,25 +886,19 @@ class _ScanStepIndicator extends StatelessWidget {
                     : isActive ? _green : Colors.grey.shade400),
           ),
           const SizedBox(height: 4),
-          Text(labels[i],
-              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                  color: isActive ? _green : Colors.grey.shade400)),
+          Text(labels[i], style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+              color: isActive ? _green : Colors.grey.shade400)),
         ]),
-        if (i < 2)
-          Container(
-            width: 32, height: 2,
+        if (i < 2) Container(width: 32, height: 2,
             margin: const EdgeInsets.only(bottom: 20),
-            color: i < current ? _green : Colors.grey.shade200,
-          ),
+            color: i < current ? _green : Colors.grey.shade200),
       ]);
     }),
   );
 }
 
 class _GreenButton extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final VoidCallback onTap;
+  final String label; final IconData icon; final VoidCallback onTap;
   static const _green = Color(0xFF2E7D32);
   const _GreenButton({required this.label, required this.icon, required this.onTap});
 
@@ -872,16 +910,14 @@ class _GreenButton extends StatelessWidget {
       decoration: BoxDecoration(
         gradient: const LinearGradient(colors: [_green, Color(0xFF43A047)]),
         borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(
-            color: _green.withOpacity(0.3), blurRadius: 14,
-            offset: const Offset(0, 5))],
+        boxShadow: [BoxShadow(color: _green.withOpacity(0.3),
+            blurRadius: 14, offset: const Offset(0, 5))],
       ),
       child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
         Icon(icon, color: Colors.white, size: 20),
         const SizedBox(width: 8),
-        Text(label,
-            style: const TextStyle(color: Colors.white, fontSize: 15,
-                fontWeight: FontWeight.w700)),
+        Text(label, style: const TextStyle(color: Colors.white, fontSize: 15,
+            fontWeight: FontWeight.w700)),
       ]),
     ),
   );
