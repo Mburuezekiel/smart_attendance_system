@@ -7,6 +7,8 @@ import userRoutes from './routes/userRoutes.js';
 import unitRoutes       from './routes/unitRoutes.js';
 import assignmentRoutes from './routes/assignmentRoutes.js';
 import sessionRoutes    from './routes/sessionRoutes.js';
+import timetableRoutes from './routes/timetableRoutes.js';
+
 
 const app = express();
 
@@ -38,6 +40,8 @@ app.use('/api/units',       unitRoutes);
 app.use('/api/assignments', assignmentRoutes);
 app.use('/api/sessions',    sessionRoutes);
  
+
+app.use('/api/timetable', timetableRoutes);
 
 
 // ── Error handler ──────────────────────────────────────────────────────────────
