@@ -8,6 +8,7 @@ import unitRoutes       from './routes/unitRoutes.js';
 import assignmentRoutes from './routes/assignmentRoutes.js';
 import sessionRoutes    from './routes/sessionRoutes.js';
 import timetableRoutes from './routes/timetableRoutes.js';
+import attendanceRoutes from './routes/attendanceRoutes.js';
 
 
 const app = express();
@@ -42,7 +43,7 @@ app.use('/api/sessions',    sessionRoutes);
  
 
 app.use('/api/timetable', timetableRoutes);
-
+app.use('/api/attendance', attendanceRoutes);
 
 // ── Error handler ──────────────────────────────────────────────────────────────
 app.use(errorHandler);

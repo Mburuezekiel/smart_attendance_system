@@ -331,7 +331,7 @@ class _HistoryPageState extends State<HistoryPage>
           pw.Text(value, style: pw.TextStyle(
               color: PdfColors.white, fontSize: 16, fontWeight: pw.FontWeight.bold)),
           pw.Text(label, style: const pw.TextStyle(
-              color: PdfColors.white70, fontSize: 9)),
+              color: PdfColors.white, fontSize: 9)),
         ]),
       );
 
