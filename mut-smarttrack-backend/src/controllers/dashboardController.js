@@ -1,14 +1,20 @@
 // controllers/dashboardController.js
+import mongoose  from 'mongoose';
 import Attendance from '../models/Attendance.js';
 import Assignment from '../models/Assignment.js';
 import Timetable  from '../models/Timetable.js';
 import Session    from '../models/Session.js';
 
-const getUserId = (user) => user._id ?? user.id;
+const getUserId  = (user) => user._id ?? user.id;
+const toObjectId = (id) => {
+  try { return new mongoose.Types.ObjectId(id.toString()); }
+  catch { return null; }
+};
+
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/dashboard/student
-// Returns everything the student home page needs in one call
 // ─────────────────────────────────────────────────────────────────────────────
 export const getStudentDashboard = async (req, res) => {
   try {
@@ -16,30 +22,38 @@ export const getStudentDashboard = async (req, res) => {
       return res.status(403).json({ message: 'Student access required.' });
     }
 
-    const studentId = getUserId(req.user);
-    const today     = new Date();
-    const dayNames  = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    const todayName = dayNames[today.getDay()];
+    const rawId     = getUserId(req.user);
+    const studentId = toObjectId(rawId);
+    if (!studentId) return res.status(400).json({ message: 'Invalid user ID.' });
 
-    // ── 1. Attendance summary ────────────────────────────────────────────────
-    const [summary] = await Attendance.aggregate([
+    const today     = new Date();
+    const todayName = DAY_NAMES[today.getDay()];
+
+    // ── 1. Attendance summary ─────────────────────────────────────────────────
+    const overallArr = await Attendance.aggregate([
       { $match: { student: studentId } },
       { $group: {
           _id:     null,
           present: { $sum: { $cond: [{ $eq: ['$status', 'present'] }, 1, 0] } },
           late:    { $sum: { $cond: [{ $eq: ['$status', 'late']    }, 1, 0] } },
-          absent:  { $sum: { $cond: [{ $eq: ['$status', 'failed']  }, 1, 0] } },
+          failed:  { $sum: { $cond: [{ $eq: ['$status', 'failed']  }, 1, 0] } },
           total:   { $sum: 1 },
         }
       },
     ]);
 
-    const stats = summary ?? { present: 0, late: 0, absent: 0, total: 0 };
-    stats.percentage = stats.total > 0
-      ? Math.round((stats.present / stats.total) * 100)
-      : 0;
+    const raw  = overallArr[0] ?? { present: 0, late: 0, failed: 0, total: 0 };
+    const stats = {
+      present:    raw.present,
+      late:       raw.late,
+      absent:     raw.total - raw.present - raw.late,  // approx
+      total:      raw.total,
+      percentage: raw.total > 0
+        ? Math.round((raw.present / raw.total) * 100)
+        : 0,
+    };
 
-    // ── 2. Today's timetable ─────────────────────────────────────────────────
+    // ── 2. Today's timetable ──────────────────────────────────────────────────
     const assignments = await Assignment.find({ students: studentId }).select('_id');
     const assignmentIds = assignments.map(a => a._id);
 
@@ -52,48 +66,47 @@ export const getStudentDashboard = async (req, res) => {
       .populate('lecturer', 'fullName')
       .sort({ startTime: 1 });
 
-    // Mark which class is happening now
     const nowMins = today.getHours() * 60 + today.getMinutes();
-    const classesWithNow = todayClasses.map(c => {
+
+    let nextSet = false;
+    const classesWithFlags = todayClasses.map(c => {
       const [sh, sm] = c.startTime.split(':').map(Number);
       const [eh, em] = c.endTime.split(':').map(Number);
+      const startM   = sh * 60 + sm;
+      const endM     = eh * 60 + em;
+      const isNow    = nowMins >= startM && nowMins < endM;
+      const isFuture = nowMins < startM;
+      const isNext   = isFuture && !nextSet;
+      if (isNext) nextSet = true;
       return {
-        _id:        c._id,
-        unitName:   c.unit?.name    ?? '—',
-        unitCode:   c.unit?.code    ?? '—',
-        lecturer:   c.lecturer?.fullName ?? '—',
-        startTime:  c.startTime,
-        endTime:    c.endTime,
-        room:       c.room,
-        isNow:      nowMins >= sh * 60 + sm && nowMins < eh * 60 + em,
-        isNext:     false, // set below
+        _id:       c._id,
+        unitName:  c.unit?.name    ?? '—',
+        unitCode:  c.unit?.code    ?? '—',
+        lecturer:  c.lecturer?.fullName ?? '—',
+        startTime: c.startTime,
+        endTime:   c.endTime,
+        room:      c.room,
+        isNow,
+        isNext,
       };
     });
 
-    // Mark the first future class as "next"
-    const nextIdx = classesWithNow.findIndex(
-      c => nowMins < c.startTime.split(':').reduce((h, m, i) => i === 0 ? +h * 60 : +h + +m)
-    );
-    if (nextIdx !== -1) classesWithNow[nextIdx].isNext = true;
-
-    // ── 3. Recent attendance activity ────────────────────────────────────────
-    const recentActivity = await Attendance.find({ student: studentId })
+    // ── 3. Recent activity ────────────────────────────────────────────────────
+    const recent = await Attendance.find({ student: studentId })
       .populate('unit', 'name code')
       .sort({ markedAt: -1 })
       .limit(5);
 
-    // ── 4. Units enrolled ────────────────────────────────────────────────────
-    const enrolledUnits = await Timetable.find({
+    // ── 4. Enrolled units (deduplicated) ──────────────────────────────────────
+    const tSlots = await Timetable.find({
       assignment: { $in: assignmentIds }, isActive: true,
     })
       .populate('unit',     'name code department')
-      .populate('lecturer', 'fullName')
-      .select('unit lecturer');
+      .populate('lecturer', 'fullName');
 
-    // Deduplicate by unit id
     const seen  = new Set();
     const units = [];
-    for (const t of enrolledUnits) {
+    for (const t of tSlots) {
       const id = t.unit?._id?.toString();
       if (id && !seen.has(id)) {
         seen.add(id);
@@ -103,12 +116,12 @@ export const getStudentDashboard = async (req, res) => {
 
     res.json({
       stats,
-      todayClasses: classesWithNow,
-      recentActivity: recentActivity.map(r => ({
-        unitName:  r.unit?.name ?? '—',
-        unitCode:  r.unit?.code ?? '—',
-        status:    r.status,
-        markedAt:  r.markedAt ?? r.createdAt,
+      todayClasses:   classesWithFlags,
+      recentActivity: recent.map(r => ({
+        unitName: r.unit?.name ?? '—',
+        unitCode: r.unit?.code ?? '—',
+        status:   r.status,
+        markedAt: r.markedAt ?? r.createdAt,
       })),
       enrolledUnits: units,
     });
@@ -119,7 +132,6 @@ export const getStudentDashboard = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /api/dashboard/lecturer
-// Returns everything the lecturer home page needs in one call
 // ─────────────────────────────────────────────────────────────────────────────
 export const getLecturerDashboard = async (req, res) => {
   try {
@@ -127,10 +139,13 @@ export const getLecturerDashboard = async (req, res) => {
       return res.status(403).json({ message: 'Lecturer access required.' });
     }
 
-    const lecturerId = getUserId(req.user);
-    const today      = new Date();
-    const dayNames   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    const todayName  = dayNames[today.getDay()];
+    const rawId      = getUserId(req.user);
+    const lecturerId = toObjectId(rawId);
+    if (!lecturerId) return res.status(400).json({ message: 'Invalid user ID.' });
+
+    const today     = new Date();
+    const todayName = DAY_NAMES[today.getDay()];
+    const nowMins   = today.getHours() * 60 + today.getMinutes();
 
     // ── 1. Today's schedule ───────────────────────────────────────────────────
     const todayClasses = await Timetable.find({
@@ -141,20 +156,18 @@ export const getLecturerDashboard = async (req, res) => {
       .populate('unit', 'name code')
       .sort({ startTime: 1 });
 
-    const nowMins = today.getHours() * 60 + today.getMinutes();
-
     const scheduleWithStats = await Promise.all(todayClasses.map(async c => {
       const [sh, sm] = c.startTime.split(':').map(Number);
       const [eh, em] = c.endTime.split(':').map(Number);
+      const isNow    = nowMins >= sh * 60 + sm && nowMins < eh * 60 + em;
 
-      // Find assignment for this timetable slot to get student count
-      const assignment = await Assignment.findById(c.assignment).select('students');
-      const total      = assignment?.students?.length ?? 0;
+      const asgn  = await Assignment.findById(c.assignment).select('students');
+      const total = asgn?.students?.length ?? 0;
 
-      // Count attendance for most recent session for this unit today
-      const startOfDay = new Date(today); startOfDay.setHours(0,0,0,0);
-      const session    = await Session.findOne({
-        lecturer: lecturerId, unit: c.unit?._id,
+      const startOfDay = new Date(today); startOfDay.setHours(0, 0, 0, 0);
+      const session = await Session.findOne({
+        lecturer:  lecturerId,
+        unit:      c.unit?._id,
         createdAt: { $gte: startOfDay },
       }).sort({ createdAt: -1 });
 
@@ -169,9 +182,7 @@ export const getLecturerDashboard = async (req, res) => {
         startTime: c.startTime,
         endTime:   c.endTime,
         room:      c.room,
-        present,
-        total,
-        isNow:     nowMins >= sh * 60 + sm && nowMins < eh * 60 + em,
+        present, total, isNow,
       };
     }));
 
@@ -181,7 +192,7 @@ export const getLecturerDashboard = async (req, res) => {
       assignments.flatMap(a => a.students.map(s => s.toString()))
     ).size;
 
-    const [overall] = await Attendance.aggregate([
+    const overallArr = await Attendance.aggregate([
       { $match: { lecturer: lecturerId } },
       { $group: {
           _id:     null,
@@ -190,12 +201,11 @@ export const getLecturerDashboard = async (req, res) => {
         }
       },
     ]);
-
-    const avgAttendance = overall?.total > 0
-      ? Math.round((overall.present / overall.total) * 100)
+    const avgAttendance = overallArr[0]?.total > 0
+      ? Math.round((overallArr[0].present / overallArr[0].total) * 100)
       : 0;
 
-    // ── 3. Per-unit attendance breakdown ──────────────────────────────────────
+    // ── 3. Per-unit attendance bars ───────────────────────────────────────────
     const unitAttendance = await Attendance.aggregate([
       { $match: { lecturer: lecturerId } },
       { $group: {
@@ -207,9 +217,14 @@ export const getLecturerDashboard = async (req, res) => {
       { $lookup: { from: 'units', localField: '_id', foreignField: '_id', as: 'unitDoc' } },
       { $unwind: { path: '$unitDoc', preserveNullAndEmptyArrays: true } },
       { $project: {
-          name:    '$unitDoc.name',
-          code:    '$unitDoc.code',
-          pct: { $round: [{ $multiply: [{ $divide: ['$present', '$total'] }, 100] }, 0] },
+          name: '$unitDoc.name',
+          code: '$unitDoc.code',
+          pct: {
+            $cond: [
+              { $eq: ['$total', 0] }, 0,
+              { $round: [{ $multiply: [{ $divide: ['$present', '$total'] }, 100] }, 0] }
+            ]
+          },
         }
       },
       { $sort: { name: 1 } },
