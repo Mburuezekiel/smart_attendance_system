@@ -382,8 +382,11 @@ class _ManageUsersPageState extends State<_ManageUsersPage> {
   @override void dispose()   { _searchCtrl.dispose(); super.dispose(); }
 
   Future<void> _fetchUsers({ int page = 1, bool append = false }) async {
-    if (append) setState(() => _loadingMore = true);
-    else        setState(() { _loading = true; _error = null; });
+    if (append) {
+      setState(() => _loadingMore = true);
+    } else {
+      setState(() { _loading = true; _error = null; });
+    }
     final result = await ApiService().get('/users', queryParams: {
       'page': '$page', 'limit': '20',
       if (_roleFilter != 'all') 'role': _roleFilter,

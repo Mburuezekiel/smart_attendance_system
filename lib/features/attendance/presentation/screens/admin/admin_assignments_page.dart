@@ -418,7 +418,11 @@ class _ManageStudentsSheetState extends State<_ManageStudentsSheet> {
               final isIn = _enrolled.contains(id);
               return CheckboxListTile(
                 value: isIn, activeColor: _teal,
-                onChanged: (v) => setState(() { if (v == true) _enrolled.add(id); else _enrolled.remove(id); }),
+                onChanged: (v) => setState(() { if (v == true) {
+                  _enrolled.add(id);
+                } else {
+                  _enrolled.remove(id);
+                } }),
                 title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                 subtitle: Text(reg, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
                 secondary: CircleAvatar(radius: 18, backgroundColor: _teal.withOpacity(0.1),
@@ -531,7 +535,7 @@ class _CreateAssignmentFormState extends State<_CreateAssignmentForm> {
 
         const _FormLabel('Unit'),
         DropdownButtonFormField<String>(
-          value: _unitId,
+          initialValue: _unitId,
           hint: const Text('Select unit…', style: TextStyle(fontSize: 13)),
           decoration: _dropDecor(), isExpanded: true,
           items: widget.units.map((u) => DropdownMenuItem(
@@ -545,7 +549,7 @@ class _CreateAssignmentFormState extends State<_CreateAssignmentForm> {
 
         const _FormLabel('Lecturer'),
         DropdownButtonFormField<String>(
-          value: _lecturerId,
+          initialValue: _lecturerId,
           hint: const Text('Select lecturer…', style: TextStyle(fontSize: 13)),
           decoration: _dropDecor(), isExpanded: true,
           items: widget.lecturers.map((l) => DropdownMenuItem(
@@ -632,7 +636,11 @@ class _CreateAssignmentFormState extends State<_CreateAssignmentForm> {
                     return CheckboxListTile(
                       dense: true, value: isIn, activeColor: _teal,
                       onChanged: (v) => setState(() {
-                        if (v == true) _selectedStudents.add(id); else _selectedStudents.remove(id);
+                        if (v == true) {
+                          _selectedStudents.add(id);
+                        } else {
+                          _selectedStudents.remove(id);
+                        }
                       }),
                       title: Text(name, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                       subtitle: Text(reg, style: TextStyle(fontSize: 11, color: Colors.grey.shade400)),
@@ -896,7 +904,7 @@ class _CreateUnitFormState extends State<_CreateUnitForm> {
           Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             const _FormLabel('Year'),
             DropdownButtonFormField<int>(
-              value: _year,
+              initialValue: _year,
               decoration: _dropDecor(),
               items: List.generate(6, (i) => DropdownMenuItem(
                   value: i + 1, child: Text('Year ${i + 1}'))),

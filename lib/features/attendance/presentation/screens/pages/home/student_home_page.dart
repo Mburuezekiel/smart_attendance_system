@@ -368,7 +368,7 @@ class _HomeBody extends StatelessWidget {
                       Text('$pct% attendance · Minimum required: 75%',
                           style: TextStyle(
                               fontSize: 11,
-                              color: (pct as num) < 75
+                              color: pct < 75
                                   ? const Color(0xFFE53935)
                                   : Colors.grey.shade500)),
                     ]),

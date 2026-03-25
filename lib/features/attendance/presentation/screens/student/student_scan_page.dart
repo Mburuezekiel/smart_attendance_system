@@ -160,8 +160,10 @@ class _StudentScanPageState extends State<StudentScanPage> {
 
     final (:pos, :err) = await _getPos();
     if (pos == null) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(err ?? 'GPS unavailable.'), backgroundColor: Colors.red));
+      }
       return setState(() => _requestingRelay = false);
     }
 
@@ -506,12 +508,14 @@ class _DoneStep extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (processing) return const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+    if (processing) {
+      return const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
       CircularProgressIndicator(color: _green, strokeWidth: 2.5),
       SizedBox(height: 14),
       Text('Submitting attendance…',
           style: TextStyle(color: _green, fontWeight: FontWeight.w600)),
     ]));
+    }
 
     final sig      = result?['digitalSignature'] as String? ?? '';
     final shortSig = sig.length > 20 ? '${sig.substring(0, 20)}…' : sig;
