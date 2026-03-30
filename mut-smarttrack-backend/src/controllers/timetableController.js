@@ -4,20 +4,30 @@ import Assignment from '../models/Assignment.js';
 
 const getUserId = (user) => user._id ?? user.id;
 
-// ── GET /api/timetable  ────────────────────────────────────────────────────────
-// Student  → returns all timetable entries for their enrolled assignments
-// Lecturer → returns all timetable entries they created
-// Admin    → returns everything
+// Day order: Monday → Saturday
+const DAY_ORDER = { Monday:1, Tuesday:2, Wednesday:3, Thursday:4, Friday:5, Saturday:6 };
+
+/** "HH:mm" → total minutes (works whether DB stores "08:00" or "8:00") */
+const toMins = (t = '00:00') => {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+};
+
+/** Sort timetable entries: day (Mon→Sat) then start time (00:00→23:59) */
+const chronoSort = (a, b) =>
+  (DAY_ORDER[a.day] - DAY_ORDER[b.day]) ||
+  (toMins(a.startTime) - toMins(b.startTime));
+
+// ── GET /api/timetable ────────────────────────────────────────────────────────
 export const getTimetable = async (req, res) => {
   try {
     const { role } = req.user;
     const userId   = getUserId(req.user);
-    let filter     = { isActive: true };
+    const filter   = { isActive: true };
 
     if (role === 'lecturer') {
       filter.lecturer = userId;
     } else if (role === 'student') {
-      // Find every assignment this student is enrolled in
       const assignments = await Assignment.find({ students: userId }).select('_id');
       filter.assignment = { $in: assignments.map(a => a._id) };
     }
@@ -30,7 +40,11 @@ export const getTimetable = async (req, res) => {
         select:   'academicYear semester',
         populate: { path: 'students', select: 'fullName registrationNumber' },
       })
-      .sort({ day: 1, startTime: 1 });
+      // No .sort() here — MongoDB sorts "8:00" after "19:00" lexicographically.
+      // We sort in JS so toMins() can normalise inconsistent time strings.
+      .lean();
+
+    entries.sort(chronoSort);
 
     res.json({ timetable: entries });
   } catch (err) {
@@ -39,7 +53,6 @@ export const getTimetable = async (req, res) => {
 };
 
 // ── POST /api/timetable  (Lecturer only) ──────────────────────────────────────
-// Lecturer creates a timetable slot for one of their assignments
 export const createTimetableEntry = async (req, res) => {
   try {
     if (req.user.role !== 'lecturer') {
@@ -55,7 +68,16 @@ export const createTimetableEntry = async (req, res) => {
       });
     }
 
-    // Verify the lecturer owns this assignment
+    if (!DAY_ORDER[day]) {
+      return res.status(400).json({
+        message: `Invalid day. Must be one of: ${Object.keys(DAY_ORDER).join(', ')}.`,
+      });
+    }
+
+    if (toMins(startTime) >= toMins(endTime)) {
+      return res.status(400).json({ message: 'startTime must be before endTime.' });
+    }
+
     const assignment = await Assignment.findOne({
       _id: assignmentId, lecturer: lecturerId,
     }).populate('unit', 'name code');
@@ -98,6 +120,18 @@ export const updateTimetableEntry = async (req, res) => {
   try {
     if (req.user.role !== 'lecturer') {
       return res.status(403).json({ message: 'Lecturer access required.' });
+    }
+
+    const { day, startTime, endTime } = req.body;
+
+    if (day && !DAY_ORDER[day]) {
+      return res.status(400).json({
+        message: `Invalid day. Must be one of: ${Object.keys(DAY_ORDER).join(', ')}.`,
+      });
+    }
+
+    if (startTime && endTime && toMins(startTime) >= toMins(endTime)) {
+      return res.status(400).json({ message: 'startTime must be before endTime.' });
     }
 
     const lecturerId = getUserId(req.user);
