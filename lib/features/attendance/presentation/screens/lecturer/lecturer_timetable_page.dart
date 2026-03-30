@@ -5,60 +5,78 @@ import 'package:go_router/go_router.dart';
 import 'package:google_nav_bar/google_nav_bar.dart';
 import '../../../../../core/services/api_service.dart';
 
-// Re-use shared helpers & widgets from student_timetable_page.dart
-// (ClassCard, ClassStatus, _Badge, _CodeChip, _NoteBox, _Header,
-//  _DaySelector, _DayView, _ErrorView, _BottomNav, _toMins, _sortKey,
-//  _todayIdx, _status, _unitColor, _kGreen, _kPurple, _kAmber, _kDays, _kDayShort)
-//
-// If the two files live in the same library, remove duplicates and import them.
-// For clarity this file is self-contained with the lecturer-specific accent.
-
-// ─── Constants (lecturer uses indigo) ────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const _kIndigo    = Color(0xFF283593);
 const _kIndigoMid = Color(0xFF3949AB);
 const _kPurpleL   = Color(0xFF6A1B9A);
 const _kAmberL    = Color(0xFFF57C00);
+
+// Lecturer includes Saturday
 const _kDaysL     = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 const _kDayShortL = ['Mon','Tue','Wed','Thu','Fri','Sat'];
 
-int _todayIdxL() { final w = DateTime.now().weekday; return w <= 5 ? w - 1 : 0; }
+// ─── Pure helpers ─────────────────────────────────────────────────────────────
 
+/// 0=Mon … 4=Fri. Saturday clamps to 5. Sunday clamps to 0.
+int _todayIdxL() {
+  final w = DateTime.now().weekday; // 1=Mon … 7=Sun
+  if (w >= 1 && w <= 6) return w - 1;  // Mon-Sat → 0-5
+  return 0;                             // Sun → show Monday
+}
+
+/// "HH:mm" or "H:mm" → minutes since midnight.
 int _toMinsL(String t) {
   final p = t.trim().split(':');
   return int.parse(p[0]) * 60 + int.parse(p[1]);
 }
 
-String _sortKeyL(Map<String, dynamic> e) =>
-    (e['startTime'] as String? ?? '00:00').padLeft(5, '0');
+/// Zero-padded sort key — lexicographic == chronological.
+String _sortKeyL(Map<String, dynamic> e) {
+  final raw = (e['startTime'] as String? ?? '00:00').trim().split(':');
+  return '${raw[0].padLeft(2, '0')}:${raw[1].padLeft(2, '0')}';
+}
 
-_ClassStatusL _statusL(Map<String, dynamic> e, {required bool isToday}) {
-  if (!isToday) return _ClassStatusL.none;
-  final now  = TimeOfDay.now();
-  final nowM = now.hour * 60 + now.minute;
-  final s    = _toMinsL(e['startTime'] as String? ?? '00:00');
-  final en   = _toMinsL(e['endTime']   as String? ?? '00:00');
-  if (nowM >= s && nowM < en) return _ClassStatusL.now;
-  if (s > nowM && s - nowM <= 30) return _ClassStatusL.upNext;
-  return _ClassStatusL.none;
+/// Deterministic colour from unit code.
+Color _unitColorL(String code) {
+  const cols = [
+    _kIndigo, Color(0xFF2E7D32), _kPurpleL,
+    _kAmberL, Color(0xFFE53935), Color(0xFF00695C),
+  ];
+  return cols[code.hashCode.abs() % cols.length];
 }
 
 enum _ClassStatusL { now, upNext, none }
 
-Color _unitColorL(String code) {
-  const cols = [_kIndigo, Color(0xFF2E7D32), _kPurpleL,
-                _kAmberL, Color(0xFFE53935), Color(0xFF00695C)];
-  return cols[code.hashCode.abs() % cols.length];
+/// Compute statuses for an entire sorted day list at once.
+/// Guarantees exactly one UP-NEXT — the first class whose start is in the future.
+List<_ClassStatusL> _computeStatusesL(
+    List<Map<String, dynamic>> entries, {required bool isToday}) {
+  if (!isToday) return List.filled(entries.length, _ClassStatusL.none);
+
+  final nowM     = TimeOfDay.now().hour * 60 + TimeOfDay.now().minute;
+  bool upNextSet = false;
+
+  return entries.map((e) {
+    final start = _toMinsL(e['startTime'] as String? ?? '00:00');
+    final end   = _toMinsL(e['endTime']   as String? ?? '00:00');
+    if (nowM >= start && nowM < end) return _ClassStatusL.now;
+    if (start > nowM && !upNextSet) {
+      upNextSet = true;
+      return _ClassStatusL.upNext;
+    }
+    return _ClassStatusL.none;
+  }).toList();
 }
 
-// ─── Page ────────────────────────────────────────────────────────────────────
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 class LecturerTimetablePage extends StatefulWidget {
   const LecturerTimetablePage({super.key});
-  @override State<LecturerTimetablePage> createState() => _LState();
+  @override State<LecturerTimetablePage> createState() => _LecturerTimetableState();
 }
 
-class _LState extends State<LecturerTimetablePage>
+class _LecturerTimetableState extends State<LecturerTimetablePage>
     with SingleTickerProviderStateMixin {
   List<Map<String, dynamic>> _tt = [], _asgn = [];
   bool    _loading  = true;
@@ -70,7 +88,8 @@ class _LState extends State<LecturerTimetablePage>
   @override
   void initState() {
     super.initState();
-    _fade = AnimationController(vsync: this, duration: const Duration(milliseconds: 400))
+    _fade = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 400))
       ..forward();
     _loadAll();
   }
@@ -93,9 +112,10 @@ class _LState extends State<LecturerTimetablePage>
     });
   }
 
-  List<Map<String, dynamic>> _dayEntries(int i) =>
-      _tt.where((e) => e['day'] == _kDaysL[i]).toList()
-        ..sort((a, b) => _sortKeyL(a).compareTo(_sortKeyL(b)));
+  /// Returns entries for the given day sorted morning → evening.
+  List<Map<String, dynamic>> _dayEntries(int idx) =>
+      (_tt.where((e) => e['day'] == _kDaysL[idx]).toList()
+        ..sort((a, b) => _sortKeyL(a).compareTo(_sortKeyL(b))));
 
   void _switchDay(int i) {
     setState(() => _dayIdx = i);
@@ -115,8 +135,9 @@ class _LState extends State<LecturerTimetablePage>
 
   @override
   Widget build(BuildContext context) {
-    final entries = _dayEntries(_dayIdx);
-    final isToday = _dayIdx == _todayIdxL();
+    final entries  = _dayEntries(_dayIdx);
+    final isToday  = _dayIdx == _todayIdxL();
+    final statuses = _computeStatusesL(entries, isToday: isToday);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
@@ -130,89 +151,103 @@ class _LState extends State<LecturerTimetablePage>
             )
           : null,
       body: Column(children: [
-        _LHeader(totalSlots: _tt.length, todayCount: entries.length, onRefresh: _loadAll),
+        _LHeader(totalSlots: _tt.length, todayCount: entries.length,
+            onRefresh: _loadAll),
         if (!_showForm)
           _LDaySelector(dayIdx: _dayIdx, tt: _tt, onSelect: _switchDay),
-        Expanded(child: _loading
-          ? const Center(child: CircularProgressIndicator(color: _kIndigo))
-          : _error != null
-            ? _LErrorView(msg: _error!, onRetry: _loadAll)
-            : _showForm
-              ? _CreateSlotForm(
-                  assignments: _asgn,
-                  selectedDay: _kDaysL[_dayIdx],
-                  onCreated: _onCreated,
-                  onCancel: () => setState(() => _showForm = false),
-                )
-              : FadeTransition(
-                  opacity: CurvedAnimation(parent: _fade, curve: Curves.easeOut),
-                  child: _LDayView(
-                    entries:  entries,
-                    dayName:  _kDaysL[_dayIdx],
-                    isToday:  isToday,
-                    asgn:     _asgn,
-                    onRefresh: _loadAll,
-                    onDeleted: _onDeleted,
-                    onUpdated: _onUpdated,
-                  ),
-                )),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator(color: _kIndigo))
+              : _error != null
+                  ? _LErrorView(msg: _error!, onRetry: _loadAll)
+                  : _showForm
+                      ? _CreateSlotForm(
+                          assignments: _asgn,
+                          selectedDay: _kDaysL[_dayIdx],
+                          onCreated:  _onCreated,
+                          onCancel:   () => setState(() => _showForm = false),
+                        )
+                      : FadeTransition(
+                          opacity: CurvedAnimation(
+                              parent: _fade, curve: Curves.easeOut),
+                          child: _LDayView(
+                            entries:   entries,
+                            statuses:  statuses,
+                            dayName:   _kDaysL[_dayIdx],
+                            asgn:      _asgn,
+                            onRefresh: _loadAll,
+                            onDeleted: _onDeleted,
+                            onUpdated: _onUpdated,
+                          ),
+                        ),
+        ),
       ]),
       bottomNavigationBar: _LBottomNav(context),
     );
   }
 }
 
-// ─── Lecturer header ──────────────────────────────────────────────────────────
+// ─── Header ───────────────────────────────────────────────────────────────────
 
 class _LHeader extends StatelessWidget {
   final int totalSlots, todayCount;
   final VoidCallback onRefresh;
-  const _LHeader({required this.totalSlots, required this.todayCount, required this.onRefresh});
+  const _LHeader({required this.totalSlots, required this.todayCount,
+      required this.onRefresh});
 
   @override
   Widget build(BuildContext context) => Container(
     decoration: const BoxDecoration(
-      gradient: LinearGradient(colors: [_kIndigo, _kIndigoMid],
-          begin: Alignment.topLeft, end: Alignment.bottomRight)),
+      gradient: LinearGradient(
+          colors: [_kIndigo, _kIndigoMid],
+          begin: Alignment.topLeft, end: Alignment.bottomRight),
+    ),
     child: SafeArea(bottom: false, child: Padding(
       padding: const EdgeInsets.fromLTRB(20, 16, 8, 20),
       child: Row(children: [
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
           Row(children: [
-            Icon(Icons.calendar_month_rounded, color: Colors.white.withOpacity(.8), size: 18),
+            Icon(Icons.calendar_month_rounded,
+                color: Colors.white.withOpacity(.8), size: 18),
             const SizedBox(width: 8),
-            const Text('My Timetable', style: TextStyle(fontSize: 22,
-                fontWeight: FontWeight.w800, color: Colors.white)),
+            const Text('My Timetable', style: TextStyle(
+                fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white)),
           ]),
           const SizedBox(height: 4),
           Text('$totalSlots slot${totalSlots != 1 ? 's' : ''} scheduled',
-              style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(.75))),
+              style: TextStyle(
+                  fontSize: 12, color: Colors.white.withOpacity(.75))),
         ])),
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(color: Colors.white.withOpacity(.15),
+          decoration: BoxDecoration(
+              color: Colors.white.withOpacity(.15),
               borderRadius: BorderRadius.circular(14)),
           child: Column(children: [
-            Text('$todayCount', style: const TextStyle(fontSize: 22,
-                fontWeight: FontWeight.w900, color: Colors.white)),
-            Text('today', style: TextStyle(fontSize: 10,
-                color: Colors.white.withOpacity(.8))),
+            Text('$todayCount', style: const TextStyle(
+                fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white)),
+            Text('today', style: TextStyle(
+                fontSize: 10, color: Colors.white.withOpacity(.8))),
           ]),
         ),
-        IconButton(icon: const Icon(Icons.refresh_rounded, color: Colors.white),
-            onPressed: onRefresh),
+        IconButton(
+          icon: const Icon(Icons.refresh_rounded, color: Colors.white),
+          onPressed: onRefresh,
+        ),
       ]),
     )),
   );
 }
 
-// ─── Day selector (indigo) ────────────────────────────────────────────────────
+// ─── Day selector ─────────────────────────────────────────────────────────────
 
 class _LDaySelector extends StatelessWidget {
   final int dayIdx;
   final List<Map<String, dynamic>> tt;
   final void Function(int) onSelect;
-  const _LDaySelector({required this.dayIdx, required this.tt, required this.onSelect});
+  const _LDaySelector({required this.dayIdx, required this.tt,
+      required this.onSelect});
 
   @override
   Widget build(BuildContext context) {
@@ -233,8 +268,8 @@ class _LDaySelector extends StatelessWidget {
               color: sel ? Colors.white : Colors.white.withOpacity(.15),
               borderRadius: BorderRadius.circular(12)),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text(_kDayShortL[i], style: TextStyle(fontSize: 11,
-                  fontWeight: FontWeight.w700,
+              Text(_kDayShortL[i], style: TextStyle(
+                  fontSize: 11, fontWeight: FontWeight.w700,
                   color: sel ? _kIndigo : Colors.white)),
               if (i == today) ...[
                 const SizedBox(height: 2),
@@ -250,8 +285,8 @@ class _LDaySelector extends StatelessWidget {
                     color: sel ? _kIndigo.withOpacity(.15)
                                : Colors.white.withOpacity(.3),
                     borderRadius: BorderRadius.circular(6)),
-                  child: Text('$count', style: TextStyle(fontSize: 9,
-                      fontWeight: FontWeight.w800,
+                  child: Text('$count', style: TextStyle(
+                      fontSize: 9, fontWeight: FontWeight.w800,
                       color: sel ? _kIndigo : Colors.white)),
                 ),
               ],
@@ -263,31 +298,34 @@ class _LDaySelector extends StatelessWidget {
   }
 }
 
-// ─── Day view (lecturer) ─────────────────────────────────────────────────────
+// ─── Day view ─────────────────────────────────────────────────────────────────
 
 class _LDayView extends StatelessWidget {
   final List<Map<String, dynamic>> entries, asgn;
-  final String dayName;
-  final bool isToday;
-  final Future<void> Function() onRefresh;
-  final void Function(String) onDeleted;
+  final List<_ClassStatusL>        statuses;
+  final String                     dayName;
+  final Future<void> Function()    onRefresh;
+  final void Function(String)      onDeleted;
   final void Function(Map<String, dynamic>) onUpdated;
-  const _LDayView({required this.entries, required this.dayName,
-      required this.isToday, required this.asgn,
+  const _LDayView({required this.entries, required this.statuses,
+      required this.dayName, required this.asgn,
       required this.onRefresh, required this.onDeleted, required this.onUpdated});
 
   @override
   Widget build(BuildContext context) {
-    if (entries.isEmpty) return Center(child: Column(
-        mainAxisAlignment: MainAxisAlignment.center, children: [
-      Icon(Icons.event_note_rounded, size: 64, color: Colors.grey.shade300),
-      const SizedBox(height: 16),
-      Text('No classes on $dayName', style: TextStyle(fontSize: 16,
-          fontWeight: FontWeight.w600, color: Colors.grey.shade400)),
-      const SizedBox(height: 6),
-      Text('Tap + New Slot to add one',
-          style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
-    ]));
+    if (entries.isEmpty) {
+      return Center(child: Column(
+          mainAxisAlignment: MainAxisAlignment.center, children: [
+        Icon(Icons.event_note_rounded, size: 64, color: Colors.grey.shade300),
+        const SizedBox(height: 16),
+        Text('No classes on $dayName', style: TextStyle(
+            fontSize: 16, fontWeight: FontWeight.w600,
+            color: Colors.grey.shade400)),
+        const SizedBox(height: 6),
+        Text('Tap + New Slot to add one',
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
+      ]));
+    }
     return RefreshIndicator(
       color: _kIndigo,
       onRefresh: onRefresh,
@@ -296,7 +334,7 @@ class _LDayView extends StatelessWidget {
         itemCount: entries.length,
         itemBuilder: (_, i) => _LecturerCard(
           entry:     entries[i],
-          status:    _statusL(entries[i], isToday: isToday),
+          status:    statuses[i],
           asgn:      asgn,
           onDeleted: () => onDeleted(entries[i]['_id'] as String),
           onUpdated: onUpdated,
@@ -305,6 +343,8 @@ class _LDayView extends StatelessWidget {
     );
   }
 }
+
+// ─── Error view ───────────────────────────────────────────────────────────────
 
 class _LErrorView extends StatelessWidget {
   final String msg; final VoidCallback onRetry;
@@ -316,15 +356,19 @@ class _LErrorView extends StatelessWidget {
       const SizedBox(height: 12),
       Text(msg, style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
       const SizedBox(height: 8),
-      Text('Tap to retry', style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+      Text('Tap to retry',
+          style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
     ])),
   );
 }
 
+// ─── Bottom nav ───────────────────────────────────────────────────────────────
+
 Widget _LBottomNav(BuildContext context) => Container(
   decoration: BoxDecoration(color: Colors.white, boxShadow: [
     BoxShadow(color: Colors.black.withOpacity(.07),
-        blurRadius: 20, offset: const Offset(0, -4))]),
+        blurRadius: 20, offset: const Offset(0, -4)),
+  ]),
   padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 14),
   child: GNav(
     backgroundColor: Colors.white,
@@ -348,18 +392,19 @@ Widget _LBottomNav(BuildContext context) => Container(
   ),
 );
 
-// ─── Lecturer card (with edit/delete) ────────────────────────────────────────
+// ─── Lecturer card (with edit / delete) ──────────────────────────────────────
 
 class _LecturerCard extends StatelessWidget {
-  final Map<String, dynamic> entry;
-  final _ClassStatusL status;
+  final Map<String, dynamic>       entry;
+  final _ClassStatusL              status;
   final List<Map<String, dynamic>> asgn;
-  final VoidCallback onDeleted;
+  final VoidCallback               onDeleted;
   final void Function(Map<String, dynamic>) onUpdated;
   const _LecturerCard({required this.entry, required this.status,
       required this.asgn, required this.onDeleted, required this.onUpdated});
 
-  Color get _color => _unitColorL((entry['unit']?['code'] as String? ?? ''));
+  Color get _color =>
+      _unitColorL((entry['unit']?['code'] as String? ?? ''));
 
   Future<void> _delete(BuildContext ctx) async {
     final ok = await showDialog<bool>(
@@ -387,8 +432,7 @@ class _LecturerCard extends StatelessWidget {
             content: Text('Slot deleted'), backgroundColor: _kIndigo));
       } else {
         ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-            content: Text(r.error ?? 'Failed'),
-            backgroundColor: Colors.red));
+            content: Text(r.error ?? 'Failed'), backgroundColor: Colors.red));
       }
     }
   }
@@ -397,7 +441,8 @@ class _LecturerCard extends StatelessWidget {
     context: ctx,
     isScrollControlled: true,
     backgroundColor: Colors.transparent,
-    builder: (_) => _EditSlotSheet(entry: entry, asgn: asgn, onUpdated: onUpdated),
+    builder: (_) => _EditSlotSheet(
+        entry: entry, asgn: asgn, onUpdated: onUpdated),
   );
 
   @override
@@ -410,13 +455,24 @@ class _LecturerCard extends StatelessWidget {
     final room  = entry['room']      as String? ?? '';
     final notes = entry['notes']     as String? ?? '';
 
-    final borderColor = status == _ClassStatusL.now    ? color
-                      : status == _ClassStatusL.upNext ? _kPurpleL
-                      : Colors.grey.shade100;
-    final borderWidth = status != _ClassStatusL.none ? 2.0 : 1.5;
-    final shadowColor = status == _ClassStatusL.now    ? color.withOpacity(.15)
-                      : status == _ClassStatusL.upNext ? _kPurpleL.withOpacity(.10)
-                      : Colors.black.withOpacity(.04);
+    final Color  borderColor;
+    final double borderWidth;
+    final Color  shadowColor;
+
+    switch (status) {
+      case _ClassStatusL.now:
+        borderColor = color;
+        borderWidth = 2.0;
+        shadowColor = color.withOpacity(.18);
+      case _ClassStatusL.upNext:
+        borderColor = _kPurpleL;
+        borderWidth = 2.0;
+        shadowColor = _kPurpleL.withOpacity(.12);
+      case _ClassStatusL.none:
+        borderColor = Colors.grey.shade100;
+        borderWidth = 1.5;
+        shadowColor = Colors.black.withOpacity(.04);
+    }
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -424,13 +480,19 @@ class _LecturerCard extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: borderColor, width: borderWidth),
-        boxShadow: [BoxShadow(color: shadowColor, blurRadius: 14, offset: const Offset(0, 4))],
+        boxShadow: [BoxShadow(
+            color: shadowColor, blurRadius: 14, offset: const Offset(0, 4))],
       ),
       child: IntrinsicHeight(child: Row(children: [
+
+        // Colour bar
         Container(width: 5, decoration: BoxDecoration(
             color: color,
             borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)))),
+                topLeft: Radius.circular(16),
+                bottomLeft: Radius.circular(16)))),
+
+        // Time column
         SizedBox(width: 68, child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 14),
           child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -438,39 +500,56 @@ class _LecturerCard extends StatelessWidget {
                 fontWeight: FontWeight.w800, color: Color(0xFF1B1B1B))),
             Container(margin: const EdgeInsets.symmetric(vertical: 3),
                 width: 1, height: 10, color: Colors.grey.shade300),
-            Text(end, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+            Text(end, style: TextStyle(
+                fontSize: 11, color: Colors.grey.shade500)),
           ]),
         )),
+
         Container(width: 1, color: Colors.grey.shade100),
+
+        // Content
         Expanded(child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+            // Title + status badge
             Row(children: [
               Expanded(child: Text(unit['name'] as String? ?? '—',
                   style: const TextStyle(fontSize: 13,
                       fontWeight: FontWeight.w800, color: Color(0xFF1B1B1B)))),
-              if (status == _ClassStatusL.now)    _LBadge('NOW',     color),
-              if (status == _ClassStatusL.upNext) _LBadge('UP NEXT', _kPurpleL),
+              if (status == _ClassStatusL.now)
+                _LBadge('● ONGOING', color)
+              else if (status == _ClassStatusL.upNext)
+                _LBadge('▶ UP NEXT', _kPurpleL),
             ]),
+
             const SizedBox(height: 4),
             _LCodeChip(code: code, color: color),
+
             if (room.isNotEmpty) ...[
               const SizedBox(height: 6),
               Row(children: [
-                Icon(Icons.location_on_outlined, size: 12, color: Colors.grey.shade500),
+                Icon(Icons.location_on_outlined, size: 12,
+                    color: Colors.grey.shade500),
                 const SizedBox(width: 3),
-                Text(room, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                Text(room, style: TextStyle(
+                    fontSize: 11, color: Colors.grey.shade600)),
               ]),
             ],
+
             if (notes.isNotEmpty) ...[
               const SizedBox(height: 6),
               _LNoteBox(notes),
             ],
+
             const SizedBox(height: 8),
+            // Edit / Delete chips
             Row(children: [
-              _ActionChip('Edit',   Icons.edit_rounded,           _kIndigo,              () => _edit(context)),
+              _ActionChip('Edit', Icons.edit_rounded, _kIndigo,
+                  () => _edit(context)),
               const SizedBox(width: 8),
-              _ActionChip('Delete', Icons.delete_outline_rounded, const Color(0xFFE53935), () => _delete(context)),
+              _ActionChip('Delete', Icons.delete_outline_rounded,
+                  const Color(0xFFE53935), () => _delete(context)),
             ]),
           ]),
         )),
@@ -479,14 +558,251 @@ class _LecturerCard extends StatelessWidget {
   }
 }
 
+// ─── Create slot form ─────────────────────────────────────────────────────────
+
+class _CreateSlotForm extends StatefulWidget {
+  final List<Map<String, dynamic>> assignments;
+  final String    selectedDay;
+  final void Function(Map<String, dynamic>) onCreated;
+  final VoidCallback onCancel;
+  const _CreateSlotForm({required this.assignments, required this.selectedDay,
+      required this.onCreated, required this.onCancel});
+  @override State<_CreateSlotForm> createState() => _CreateSlotFormState();
+}
+
+class _CreateSlotFormState extends State<_CreateSlotForm> {
+  String? _asgnId;
+  String  _day = 'Monday', _start = '08:00', _end = '10:00';
+  final   _roomCtrl  = TextEditingController();
+  final   _notesCtrl = TextEditingController();
+  bool    _saving = false;
+  String? _error;
+
+  @override void initState() { super.initState(); _day = widget.selectedDay; }
+  @override void dispose() { _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); }
+
+  Future<void> _pickTime(bool isStart) async {
+    final p = (isStart ? _start : _end).split(':');
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1])),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+            colorScheme: const ColorScheme.light(primary: _kIndigo)),
+        child: child!),
+    );
+    if (picked == null) return;
+    final f = '${picked.hour.toString().padLeft(2, '0')}'
+              ':${picked.minute.toString().padLeft(2, '0')}';
+    setState(() => isStart ? _start = f : _end = f);
+  }
+
+  Future<void> _submit() async {
+    if (_asgnId == null) {
+      setState(() => _error = 'Please select a unit.'); return;
+    }
+    setState(() { _saving = true; _error = null; });
+    final r = await ApiService().post('/timetable', {
+      'assignmentId': _asgnId, 'day': _day,
+      'startTime': _start, 'endTime': _end,
+      'room': _roomCtrl.text.trim(), 'notes': _notesCtrl.text.trim(),
+    });
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (r.success) {
+      widget.onCreated(r.data?['entry'] as Map<String, dynamic>? ?? {});
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Slot created!'), backgroundColor: _kIndigo));
+    } else {
+      setState(() => _error = r.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      _FormHeader(title: 'Create Timetable Slot',
+          icon: Icons.add_box_rounded, onClose: widget.onCancel),
+      const SizedBox(height: 14),
+      _Label('Unit'),
+      DropdownButtonFormField<String>(
+        value: _asgnId,
+        hint: const Text('Select unit…', style: TextStyle(fontSize: 13)),
+        decoration: _dropDec(),
+        isExpanded: true,
+        items: widget.assignments.map((a) {
+          final u = a['unit'] as Map<String, dynamic>? ?? {};
+          return DropdownMenuItem(
+            value: a['_id'] as String?,
+            child: Text('${u['code']} — ${u['name']}',
+                style: const TextStyle(fontSize: 13),
+                overflow: TextOverflow.ellipsis));
+        }).toList(),
+        onChanged: (v) => setState(() => _asgnId = v),
+      ),
+      const SizedBox(height: 12),
+      _Label('Day'),
+      DropdownButtonFormField<String>(
+        value: _day, decoration: _dropDec(),
+        items: _kDaysL.map((d) =>
+            DropdownMenuItem(value: d, child: Text(d))).toList(),
+        onChanged: (v) => setState(() => _day = v!),
+      ),
+      const SizedBox(height: 12),
+      Row(children: [
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [_Label('Start'), _TimeTile(_start, () => _pickTime(true))])),
+        const SizedBox(width: 12),
+        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+            children: [_Label('End'), _TimeTile(_end, () => _pickTime(false))])),
+      ]),
+      const SizedBox(height: 12),
+      _Label('Room (optional)'),
+      _TF(_roomCtrl, 'e.g. LH-3'),
+      const SizedBox(height: 12),
+      _Label('Notes (optional)'),
+      _TF(_notesCtrl, 'Visible to students…', maxLines: 2),
+      if (_error != null) ...[const SizedBox(height: 10), _ErrorBanner(_error!)],
+      const SizedBox(height: 20),
+      _SubmitBtn(label: 'Create Slot', saving: _saving, onTap: _submit),
+    ]),
+  );
+}
+
+// ─── Edit slot bottom sheet ───────────────────────────────────────────────────
+
+class _EditSlotSheet extends StatefulWidget {
+  final Map<String, dynamic> entry;
+  final List<Map<String, dynamic>> asgn;
+  final void Function(Map<String, dynamic>) onUpdated;
+  const _EditSlotSheet({required this.entry, required this.asgn,
+      required this.onUpdated});
+  @override State<_EditSlotSheet> createState() => _EditSlotSheetState();
+}
+
+class _EditSlotSheetState extends State<_EditSlotSheet> {
+  late String _day, _start, _end;
+  late TextEditingController _roomCtrl, _notesCtrl;
+  bool    _saving = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _day       = widget.entry['day']       as String? ?? 'Monday';
+    _start     = widget.entry['startTime'] as String? ?? '08:00';
+    _end       = widget.entry['endTime']   as String? ?? '10:00';
+    _roomCtrl  = TextEditingController(text: widget.entry['room']  as String? ?? '');
+    _notesCtrl = TextEditingController(text: widget.entry['notes'] as String? ?? '');
+  }
+
+  @override void dispose() { _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); }
+
+  Future<void> _pickTime(bool isStart) async {
+    final p = (isStart ? _start : _end).split(':');
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1])),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+            colorScheme: const ColorScheme.light(primary: _kIndigo)),
+        child: child!),
+    );
+    if (picked == null) return;
+    final f = '${picked.hour.toString().padLeft(2, '0')}'
+              ':${picked.minute.toString().padLeft(2, '0')}';
+    setState(() => isStart ? _start = f : _end = f);
+  }
+
+  Future<void> _save() async {
+    setState(() { _saving = true; _error = null; });
+    final r = await ApiService().patch('/timetable/${widget.entry['_id']}', {
+      'day': _day, 'startTime': _start, 'endTime': _end,
+      'room': _roomCtrl.text.trim(), 'notes': _notesCtrl.text.trim(),
+    });
+    if (!mounted) return;
+    setState(() => _saving = false);
+    if (r.success) {
+      widget.onUpdated(r.data?['entry'] as Map<String, dynamic>? ?? {});
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Slot updated!'), backgroundColor: _kIndigo));
+    } else {
+      setState(() => _error = r.error);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => DraggableScrollableSheet(
+    initialChildSize: .80, maxChildSize: .95, minChildSize: .5,
+    builder: (_, ctrl) => Container(
+      decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      child: Column(children: [
+        Container(margin: const EdgeInsets.only(top: 12), width: 40, height: 4,
+            decoration: BoxDecoration(color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2))),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 14, 16, 0),
+          child: Row(children: [
+            const Text('Edit Slot',
+                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+            const Spacer(),
+            TextButton(onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+          ]),
+        ),
+        Expanded(child: SingleChildScrollView(
+          controller: ctrl,
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            _Label('Day'),
+            DropdownButtonFormField<String>(
+              value: _day, decoration: _dropDec(),
+              items: _kDaysL.map((d) =>
+                  DropdownMenuItem(value: d, child: Text(d))).toList(),
+              onChanged: (v) => setState(() => _day = v!),
+            ),
+            const SizedBox(height: 12),
+            Row(children: [
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [_Label('Start'),
+                    _TimeTile(_start, () => _pickTime(true))])),
+              const SizedBox(width: 12),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [_Label('End'),
+                    _TimeTile(_end, () => _pickTime(false))])),
+            ]),
+            const SizedBox(height: 12),
+            _Label('Room'),
+            _TF(_roomCtrl, 'e.g. LH-3'),
+            const SizedBox(height: 12),
+            _Label('Notes'),
+            _TF(_notesCtrl, 'Any notes…', maxLines: 2),
+            if (_error != null) ...[
+              const SizedBox(height: 10), _ErrorBanner(_error!)],
+            const SizedBox(height: 20),
+            _SubmitBtn(label: 'Save Changes', saving: _saving, onTap: _save),
+          ]),
+        )),
+      ]),
+    ),
+  );
+}
+
+// ─── Tiny shared widgets ──────────────────────────────────────────────────────
+
 class _LBadge extends StatelessWidget {
   final String label; final Color color;
   const _LBadge(this.label, this.color);
   @override Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
     decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(7)),
-    child: Text(label, style: const TextStyle(fontSize: 8,
-        fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 1)),
+    child: Text(label, style: const TextStyle(
+        fontSize: 8, fontWeight: FontWeight.w900,
+        color: Colors.white, letterSpacing: 0.8)),
   );
 }
 
@@ -497,8 +813,8 @@ class _LCodeChip extends StatelessWidget {
     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
     decoration: BoxDecoration(
         color: color.withOpacity(.1), borderRadius: BorderRadius.circular(5)),
-    child: Text(code, style: TextStyle(fontSize: 9,
-        fontWeight: FontWeight.w800, color: color)),
+    child: Text(code, style: TextStyle(
+        fontSize: 9, fontWeight: FontWeight.w800, color: color)),
   );
 }
 
@@ -538,236 +854,10 @@ class _ActionChip extends StatelessWidget {
   );
 }
 
-// ─── Create slot form ─────────────────────────────────────────────────────────
-
-class _CreateSlotForm extends StatefulWidget {
-  final List<Map<String, dynamic>> assignments;
-  final String selectedDay;
-  final void Function(Map<String, dynamic>) onCreated;
-  final VoidCallback onCancel;
-  const _CreateSlotForm({required this.assignments, required this.selectedDay,
-      required this.onCreated, required this.onCancel});
-  @override State<_CreateSlotForm> createState() => _CreateSlotFormState();
-}
-
-class _CreateSlotFormState extends State<_CreateSlotForm> {
-  String? _asgnId;
-  String  _day = 'Monday', _start = '08:00', _end = '10:00';
-  final   _roomCtrl  = TextEditingController();
-  final   _notesCtrl = TextEditingController();
-  bool    _saving = false;
-  String? _error;
-
-  @override void initState() { super.initState(); _day = widget.selectedDay; }
-  @override void dispose() { _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); }
-
-  Future<void> _pickTime(bool isStart) async {
-    final p = (isStart ? _start : _end).split(':');
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1])),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-            colorScheme: const ColorScheme.light(primary: _kIndigo)),
-        child: child!),
-    );
-    if (picked == null) return;
-    final f = '${picked.hour.toString().padLeft(2,'0')}:${picked.minute.toString().padLeft(2,'0')}';
-    setState(() => isStart ? _start = f : _end = f);
-  }
-
-  Future<void> _submit() async {
-    if (_asgnId == null) { setState(() => _error = 'Please select a unit.'); return; }
-    setState(() { _saving = true; _error = null; });
-    final r = await ApiService().post('/timetable', {
-      'assignmentId': _asgnId, 'day': _day,
-      'startTime': _start, 'endTime': _end,
-      'room': _roomCtrl.text.trim(), 'notes': _notesCtrl.text.trim(),
-    });
-    if (!mounted) return;
-    setState(() => _saving = false);
-    if (r.success) {
-      widget.onCreated(r.data?['entry'] as Map<String,dynamic>? ?? {});
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Slot created!'), backgroundColor: _kIndigo));
-    } else {
-      setState(() => _error = r.error);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        // Form header
-        _FormHeader(title: 'Create Timetable Slot',
-            icon: Icons.add_box_rounded, onClose: widget.onCancel),
-        const SizedBox(height: 16),
-        _Label('Unit'),
-        DropdownButtonFormField<String>(
-          value: _asgnId,
-          hint: const Text('Select unit…', style: TextStyle(fontSize: 13)),
-          decoration: _dropDec(),
-          isExpanded: true,
-          items: widget.assignments.map((a) {
-            final u = a['unit'] as Map<String,dynamic>? ?? {};
-            return DropdownMenuItem(value: a['_id'] as String?,
-                child: Text('${u['code']} — ${u['name']}',
-                    style: const TextStyle(fontSize: 13),
-                    overflow: TextOverflow.ellipsis));
-          }).toList(),
-          onChanged: (v) => setState(() => _asgnId = v),
-        ),
-        const SizedBox(height: 12),
-        _Label('Day'),
-        DropdownButtonFormField<String>(
-          value: _day, decoration: _dropDec(),
-          items: _kDaysL.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList(),
-          onChanged: (v) => setState(() => _day = v!),
-        ),
-        const SizedBox(height: 12),
-        Row(children: [
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-              children: [_Label('Start'), _TimeTile(_start, () => _pickTime(true))])),
-          const SizedBox(width: 12),
-          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-              children: [_Label('End'), _TimeTile(_end, () => _pickTime(false))])),
-        ]),
-        const SizedBox(height: 12),
-        _Label('Room (optional)'),
-        _TextField(_roomCtrl, 'e.g. LH-3'),
-        const SizedBox(height: 12),
-        _Label('Notes (optional)'),
-        _TextField(_notesCtrl, 'Visible to students…', maxLines: 2),
-        if (_error != null) ...[const SizedBox(height: 10), _ErrorBanner(_error!)],
-        const SizedBox(height: 20),
-        _SubmitButton(label: 'Create Slot', saving: _saving, onTap: _submit),
-      ]),
-    );
-  }
-}
-
-// ─── Edit slot bottom sheet ───────────────────────────────────────────────────
-
-class _EditSlotSheet extends StatefulWidget {
-  final Map<String, dynamic> entry;
-  final List<Map<String, dynamic>> asgn;
-  final void Function(Map<String, dynamic>) onUpdated;
-  const _EditSlotSheet({required this.entry, required this.asgn, required this.onUpdated});
-  @override State<_EditSlotSheet> createState() => _EditSlotSheetState();
-}
-
-class _EditSlotSheetState extends State<_EditSlotSheet> {
-  late String _day, _start, _end;
-  late TextEditingController _roomCtrl, _notesCtrl;
-  bool    _saving = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _day   = widget.entry['day']       as String? ?? 'Monday';
-    _start = widget.entry['startTime'] as String? ?? '08:00';
-    _end   = widget.entry['endTime']   as String? ?? '10:00';
-    _roomCtrl  = TextEditingController(text: widget.entry['room']  as String? ?? '');
-    _notesCtrl = TextEditingController(text: widget.entry['notes'] as String? ?? '');
-  }
-
-  @override void dispose() { _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); }
-
-  Future<void> _pickTime(bool isStart) async {
-    final p = (isStart ? _start : _end).split(':');
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1])),
-      builder: (ctx, child) => Theme(
-        data: Theme.of(ctx).copyWith(
-            colorScheme: const ColorScheme.light(primary: _kIndigo)),
-        child: child!),
-    );
-    if (picked == null) return;
-    final f = '${picked.hour.toString().padLeft(2,'0')}:${picked.minute.toString().padLeft(2,'0')}';
-    setState(() => isStart ? _start = f : _end = f);
-  }
-
-  Future<void> _save() async {
-    setState(() { _saving = true; _error = null; });
-    final r = await ApiService().patch('/timetable/${widget.entry['_id']}', {
-      'day': _day, 'startTime': _start, 'endTime': _end,
-      'room': _roomCtrl.text.trim(), 'notes': _notesCtrl.text.trim(),
-    });
-    if (!mounted) return;
-    setState(() => _saving = false);
-    if (r.success) {
-      widget.onUpdated(r.data?['entry'] as Map<String,dynamic>? ?? {});
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Slot updated!'), backgroundColor: _kIndigo));
-    } else {
-      setState(() => _error = r.error);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => DraggableScrollableSheet(
-    initialChildSize: .80, maxChildSize: .95, minChildSize: .5,
-    builder: (_, ctrl) => Container(
-      decoration: const BoxDecoration(color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      child: Column(children: [
-        Container(margin: const EdgeInsets.only(top: 12), width: 40, height: 4,
-            decoration: BoxDecoration(color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(2))),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(20, 14, 16, 0),
-          child: Row(children: [
-            const Text('Edit Slot',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
-            const Spacer(),
-            TextButton(onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel')),
-          ]),
-        ),
-        Expanded(child: SingleChildScrollView(
-          controller: ctrl,
-          padding: const EdgeInsets.all(16),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            _Label('Day'),
-            DropdownButtonFormField<String>(
-              value: _day, decoration: _dropDec(),
-              items: _kDaysL.map((d) => DropdownMenuItem(value: d, child: Text(d))).toList(),
-              onChanged: (v) => setState(() => _day = v!),
-            ),
-            const SizedBox(height: 12),
-            Row(children: [
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [_Label('Start'), _TimeTile(_start, () => _pickTime(true))])),
-              const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [_Label('End'), _TimeTile(_end, () => _pickTime(false))])),
-            ]),
-            const SizedBox(height: 12),
-            _Label('Room'),
-            _TextField(_roomCtrl, 'e.g. LH-3'),
-            const SizedBox(height: 12),
-            _Label('Notes'),
-            _TextField(_notesCtrl, 'Any notes…', maxLines: 2),
-            if (_error != null) ...[const SizedBox(height: 10), _ErrorBanner(_error!)],
-            const SizedBox(height: 20),
-            _SubmitButton(label: 'Save Changes', saving: _saving, onTap: _save),
-          ]),
-        )),
-      ]),
-    ),
-  );
-}
-
-// ─── Shared form micro-widgets ────────────────────────────────────────────────
-
 class _FormHeader extends StatelessWidget {
   final String title; final IconData icon; final VoidCallback onClose;
-  const _FormHeader({required this.title, required this.icon, required this.onClose});
+  const _FormHeader({required this.title, required this.icon,
+      required this.onClose});
   @override Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(14),
     decoration: BoxDecoration(
@@ -777,8 +867,8 @@ class _FormHeader extends StatelessWidget {
     child: Row(children: [
       Icon(icon, color: _kIndigo, size: 20),
       const SizedBox(width: 10),
-      Expanded(child: Text(title, style: const TextStyle(fontSize: 14,
-          fontWeight: FontWeight.w800, color: _kIndigo))),
+      Expanded(child: Text(title, style: const TextStyle(
+          fontSize: 14, fontWeight: FontWeight.w800, color: _kIndigo))),
       GestureDetector(
         onTap: onClose,
         child: Container(
@@ -796,8 +886,8 @@ class _Label extends StatelessWidget {
   const _Label(this.text);
   @override Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 5),
-    child: Text(text, style: const TextStyle(fontSize: 12,
-        fontWeight: FontWeight.w700, color: Color(0xFF1B1B1B))),
+    child: Text(text, style: const TextStyle(
+        fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1B1B1B))),
   );
 }
 
@@ -808,32 +898,36 @@ class _TimeTile extends StatelessWidget {
     onTap: onTap,
     child: Container(
       height: 48,
-      decoration: BoxDecoration(color: const Color(0xFFF7F7F7),
+      decoration: BoxDecoration(
+          color: const Color(0xFFF7F7F7),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: Colors.grey.shade200)),
       child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
         const Icon(Icons.access_time_rounded, size: 16, color: _kIndigo),
         const SizedBox(width: 6),
-        Text(time, style: const TextStyle(fontSize: 14,
-            fontWeight: FontWeight.w800, color: _kIndigo)),
+        Text(time, style: const TextStyle(
+            fontSize: 14, fontWeight: FontWeight.w800, color: _kIndigo)),
       ]),
     ),
   );
 }
 
-Widget _TextField(TextEditingController ctrl, String hint, {int maxLines = 1}) =>
+Widget _TF(TextEditingController ctrl, String hint, {int maxLines = 1}) =>
     TextField(
       controller: ctrl, maxLines: maxLines,
       decoration: InputDecoration(
         hintText: hint,
         hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade400),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         filled: true, fillColor: const Color(0xFFF7F7F7),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide(color: Colors.grey.shade200)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+        enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide(color: Colors.grey.shade200)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+        focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
             borderSide: const BorderSide(color: _kIndigo, width: 2)),
       ),
     );
@@ -856,13 +950,15 @@ class _ErrorBanner extends StatelessWidget {
     padding: const EdgeInsets.all(10),
     decoration: BoxDecoration(color: const Color(0xFFFFEBEE),
         borderRadius: BorderRadius.circular(10)),
-    child: Text(msg, style: const TextStyle(fontSize: 12, color: Color(0xFFE53935))),
+    child: Text(msg, style: const TextStyle(
+        fontSize: 12, color: Color(0xFFE53935))),
   );
 }
 
-class _SubmitButton extends StatelessWidget {
+class _SubmitBtn extends StatelessWidget {
   final String label; final bool saving; final VoidCallback onTap;
-  const _SubmitButton({required this.label, required this.saving, required this.onTap});
+  const _SubmitBtn({required this.label, required this.saving,
+      required this.onTap});
   @override Widget build(BuildContext context) => GestureDetector(
     onTap: saving ? null : onTap,
     child: Container(
@@ -874,9 +970,9 @@ class _SubmitButton extends StatelessWidget {
             blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Center(child: saving
-        ? const CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
-        : Text(label, style: const TextStyle(color: Colors.white,
-              fontSize: 14, fontWeight: FontWeight.w700))),
+          ? const CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
+          : Text(label, style: const TextStyle(
+              color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700))),
     ),
   );
 }
