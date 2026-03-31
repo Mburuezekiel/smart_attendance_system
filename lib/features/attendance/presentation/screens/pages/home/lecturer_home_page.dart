@@ -83,9 +83,10 @@ class _LecturerHomePageState extends State<LecturerHomePage>
       bottomNavigationBar: _LecturerBottomNav(
         selectedIndex: _selectedIndex,
         onTabChange: (i) {
-          if (i == 2) { context.go('/history');   return; }
-          if (i == 3) { context.go('/timetable'); return; }
-          if (i == 4) { context.go('/settings');  return; }
+          if (i == 2) { context.go('/analytics');  return; }
+          if (i == 3) { context.go('/timetable');  return; }
+          if (i == 4) { context.go('/history');    return; }
+          if (i == 5) { context.go('/settings');   return; }
           setState(() => _selectedIndex = i);
         },
       ),
@@ -128,6 +129,7 @@ class _LecturerBottomNav extends StatelessWidget {
           GButton(icon: Icons.qr_code_rounded,         text: 'QR Code'),
           GButton(icon: Icons.assessment_rounded,      text: 'Reports'),
           GButton(icon: Icons.calendar_today_rounded,  text: 'Schedule'),
+          GButton(icon: Icons.history_rounded,         text: 'History'),
           GButton(icon: Icons.settings_rounded,        text: 'Settings'),
         ],
       ),
@@ -436,7 +438,7 @@ class _LecHomeBody extends StatelessWidget {
                     icon: Icons.analytics_rounded,
                     color: _indigo,
                     action: rawUnits.isEmpty ? null : 'Details',
-                    onAction: () => context.go('/history')),
+                    onAction: () => context.go('/analytics')), // ✅ fixed
                 const SizedBox(height: 12),
 
                 if (rawUnits.isEmpty)

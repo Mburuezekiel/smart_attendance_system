@@ -26,6 +26,7 @@ const attendanceSchema = new mongoose.Schema({
     latitude:  { type: Number },
     longitude: { type: Number },
   },
+   autoMarked: { type: Boolean, default: false },
 
   markedAt: { type: Date, default: Date.now },
   status: {

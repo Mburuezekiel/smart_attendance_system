@@ -81,7 +81,8 @@ class _StudentHomePageState extends State<StudentHomePage>
         onTabChange: (i) {
           if (i == 2) { context.go('/history');   return; }
           if (i == 3) { context.go('/timetable'); return; }
-          if (i == 4) { context.go('/settings');  return; }
+          if (i == 4) { context.go('/analytics'); return; } // ✅ new
+          if (i == 5) { context.go('/settings');  return; }
           setState(() => _selectedIndex = i);
         },
       ),
@@ -124,6 +125,7 @@ class _StudentBottomNav extends StatelessWidget {
           GButton(icon: Icons.qr_code_scanner_rounded, text: 'Scan'),
           GButton(icon: Icons.history_rounded,         text: 'History'),
           GButton(icon: Icons.calendar_today_rounded,  text: 'Timetable'),
+          GButton(icon: Icons.analytics_rounded,       text: 'Analytics'), // ✅ new
           GButton(icon: Icons.settings_rounded,        text: 'Settings'),
         ],
       ),
@@ -173,7 +175,6 @@ class _HomeBody extends StatelessWidget {
     return '${dt.day}/${dt.month}/${dt.year}';
   }
 
-  // Deterministic colour from a string
   Color _colorFromString(String s) {
     const palette = [
       Color(0xFF1565C0), Color(0xFF6A1B9A), Color(0xFF2E7D32),
@@ -200,21 +201,15 @@ class _HomeBody extends StatelessWidget {
     final regNumber = getRegNumber();
     final dash      = getDashboard();
 
-    // ── Stats ─────────────────────────────────────────────────────────────────
     final stats    = dash?['stats'] as Map<String, dynamic>? ?? {};
     final present  = stats['present']    ?? 0;
     final absent   = stats['absent']     ?? 0;
     final late     = stats['late']       ?? 0;
     final pct      = stats['percentage'] ?? 0;
 
-    // ── Today's classes ───────────────────────────────────────────────────────
-    final rawClasses = dash?['todayClasses'] as List? ?? [];
-
-    // ── Recent activity ───────────────────────────────────────────────────────
+    final rawClasses  = dash?['todayClasses']   as List? ?? [];
     final rawActivity = dash?['recentActivity'] as List? ?? [];
-
-    // ── Enrolled units ────────────────────────────────────────────────────────
-    final rawUnits = dash?['enrolledUnits'] as List? ?? [];
+    final rawUnits    = dash?['enrolledUnits']  as List? ?? [];
 
     return RefreshIndicator(
       color: _green,
@@ -487,9 +482,9 @@ class _HomeBody extends StatelessWidget {
                   _QuickAction('History',     Icons.history_rounded,
                       const Color(0xFF6A1B9A),
                       () => context.go('/history')),
-                  _QuickAction('Settings',    Icons.settings_rounded,
+                  _QuickAction('Analytics',   Icons.analytics_rounded,
                       const Color(0xFFF57C00),
-                      () => context.go('/settings')),
+                      () => context.go('/analytics')),
                 ]),
                 const SizedBox(height: 20),
 

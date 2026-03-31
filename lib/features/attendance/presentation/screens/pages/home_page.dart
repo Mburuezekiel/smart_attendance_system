@@ -918,12 +918,14 @@ class _BottomNav extends StatelessWidget {
           if (index == 1) {
             context.go('/history');
           } else if (index == 2) context.go('/timetable');
-          else if (index == 3) context.go('/settings');
+          else if (index == 3) context.go('/analytics'); // ✅ fixed
+          else if (index == 4) context.go('/settings');  // ✅ fixed
         },
         tabs: const [
           GButton(icon: Icons.home_rounded, text: 'Home'),
           GButton(icon: Icons.history_rounded, text: 'History'),
           GButton(icon: Icons.calendar_today_rounded, text: 'Calendar'),
+          GButton(icon: Icons.analytics, text: 'Analytics'),
           GButton(icon: Icons.settings_rounded, text: 'Settings'),
         ],
       ),

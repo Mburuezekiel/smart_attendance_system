@@ -255,7 +255,8 @@ class _DayView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (entries.isEmpty) return Center(child: Column(
+    if (entries.isEmpty) {
+      return Center(child: Column(
         mainAxisAlignment: MainAxisAlignment.center, children: [
       Icon(emptyIcon, size: 64, color: Colors.grey.shade300),
       const SizedBox(height: 16),
@@ -264,6 +265,7 @@ class _DayView extends StatelessWidget {
       const SizedBox(height: 6),
       Text(emptyHint, style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
     ]));
+    }
     return RefreshIndicator(
       color: _kGreen,
       onRefresh: onRefresh,

@@ -627,7 +627,7 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
       const SizedBox(height: 14),
       _Label('Unit'),
       DropdownButtonFormField<String>(
-        value: _asgnId,
+        initialValue: _asgnId,
         hint: const Text('Select unit…', style: TextStyle(fontSize: 13)),
         decoration: _dropDec(),
         isExpanded: true,
@@ -644,7 +644,7 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
       const SizedBox(height: 12),
       _Label('Day'),
       DropdownButtonFormField<String>(
-        value: _day, decoration: _dropDec(),
+        initialValue: _day, decoration: _dropDec(),
         items: _kDaysL.map((d) =>
             DropdownMenuItem(value: d, child: Text(d))).toList(),
         onChanged: (v) => setState(() => _day = v!),
@@ -760,7 +760,7 @@ class _EditSlotSheetState extends State<_EditSlotSheet> {
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             _Label('Day'),
             DropdownButtonFormField<String>(
-              value: _day, decoration: _dropDec(),
+              initialValue: _day, decoration: _dropDec(),
               items: _kDaysL.map((d) =>
                   DropdownMenuItem(value: d, child: Text(d))).toList(),
               onChanged: (v) => setState(() => _day = v!),

@@ -12,6 +12,7 @@ import '../features/attendance/presentation/screens/auth/signup.dart';
 import '../features/attendance/presentation/screens/pages/history.dart';
 import '../features/attendance/presentation/screens/pages/settings.dart';
 import '../features/attendance/presentation/screens/pages/qr_scan.dart';
+import '../features/attendance/presentation/screens/pages/analytics.dart';
 
 // ── Home pages ────────────────────────────────────────────────────────────────
 import '../features/attendance/presentation/screens/pages/onboarding_page.dart';
@@ -113,5 +114,6 @@ final GoRouter appRouter = GoRouter(
     GoRoute(path: '/notifications', builder: (_, __) => const NotificationsPage()),
     GoRoute(path: '/security',      builder: (_, __) => const SecurityPage()),
     GoRoute(path: '/help_support',  builder: (_, __) => const HelpAndSupportPage()),
+    GoRoute(path: '/analytics',     builder: (_, __) => const AnalyticsPage()),
   ],
 );

@@ -3,9 +3,14 @@ import crypto     from 'crypto';
 import Session    from '../models/Session.js';
 import Assignment from '../models/Assignment.js';
 import Attendance from '../models/Attendance.js';
+import Timetable  from '../models/Timetable.js';
 
 const SESSION_DURATION_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_RADIUS_M    = 50;              // 50 metre default geofence
+
+// ── Threshold: % of enrolled students that must have signed before
+//    absent-marking is triggered when the session ends ────────────────────────
+const ABSENT_TRIGGER_THRESHOLD = 0.5; // 50 %
 
 // ── Haversine distance (metres) ───────────────────────────────────────────────
 const distanceMeters = (lat1, lon1, lat2, lon2) => {
@@ -22,7 +27,6 @@ const distanceMeters = (lat1, lon1, lat2, lon2) => {
 // ── Check whether a coordinate is inside a session's geofence ─────────────────
 const isInsideGeofence = (session, latitude, longitude) => {
   const { geofence } = session;
-  // If lecturer never set a geofence centre, skip the check
   if (!geofence?.latitude || !geofence?.longitude) return true;
   const dist = distanceMeters(
     latitude, longitude,
@@ -45,8 +49,99 @@ const generateRelayToken = (attendanceId, studentId, sessionId, nonce) =>
     .digest('hex');
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HELPER: "HH:mm" string → total minutes since midnight
+// ─────────────────────────────────────────────────────────────────────────────
+const toMins = (t = '00:00') => {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Given a session, find its timetable slot for today.
+//         Returns the Timetable doc or null.
+// ─────────────────────────────────────────────────────────────────────────────
+const getTodaySlot = async (session) => {
+  const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const today = days[new Date().getDay()];
+
+  return Timetable.findOne({
+    assignment: session.assignment,
+    unit:       session.unit,
+    day:        today,
+    isActive:   true,
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Re-evaluate all present records in a session and mark any that were
+//         signed after the timetable end-time as 'late'.
+// ─────────────────────────────────────────────────────────────────────────────
+const reEvaluateLate = async (session, slot) => {
+  if (!slot) return; // no timetable entry → can't determine lateness
+
+  // endTime is stored as "HH:mm". Build a Date for today at that time.
+  const [endH, endM] = slot.endTime.split(':').map(Number);
+  const classEnd = new Date();
+  classEnd.setHours(endH, endM, 0, 0);
+
+  // Any 'present' record whose markedAt is after class end → 'late'
+  await Attendance.updateMany(
+    {
+      session: session._id,
+      status:  'present',
+      markedAt: { $gt: classEnd },
+    },
+    { $set: { status: 'late' } }
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPER: Auto-mark absent students when a session ends (or expires).
+//         Only fires if ≥ ABSENT_TRIGGER_THRESHOLD of enrolled students signed.
+// ─────────────────────────────────────────────────────────────────────────────
+const autoMarkAbsent = async (session) => {
+  const assignment = await Assignment.findById(session.assignment).select('students');
+  if (!assignment) return;
+
+  const enrolled      = assignment.students.map(s => s.toString());
+  const totalEnrolled = enrolled.length;
+  if (totalEnrolled === 0) return;
+
+  // Students who already have an attendance record (present / late / failed)
+  const signed = await Attendance.find({ session: session._id }).select('student');
+  const signedIds = new Set(signed.map(a => a.student.toString()));
+
+  const signedCount = signedIds.size;
+  const threshold   = Math.ceil(totalEnrolled * ABSENT_TRIGGER_THRESHOLD);
+
+  // Only auto-mark if enough students participated
+  if (signedCount < threshold) return;
+
+  // Students with no record at all → absent
+  const absentStudents = enrolled.filter(id => !signedIds.has(id));
+  if (absentStudents.length === 0) return;
+
+  const now = new Date();
+  const absentDocs = absentStudents.map(studentId => ({
+    session:           session._id,
+    assignment:        session.assignment,
+    unit:              session.unit,
+    student:           studentId,
+    lecturer:          session.lecturer,
+    status:            'failed',   // 'failed' = absent in your schema
+    markedAt:          now,
+    autoMarked:        true,       // flag so you can distinguish auto vs manual
+    qrVerified:        false,
+    biometricVerified: false,
+    faceVerified:      false,
+  }));
+
+  // insertMany with ordered:false so one dup-key error doesn't kill the batch
+  await Attendance.insertMany(absentDocs, { ordered: false }).catch(() => {});
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sessions  (Lecturer only)
-// Body: { assignmentId, location?, geofence?: { latitude, longitude, radiusMeters } }
 // ─────────────────────────────────────────────────────────────────────────────
 export const createSession = async (req, res) => {
   try {
@@ -69,10 +164,20 @@ export const createSession = async (req, res) => {
       return res.status(404).json({ message: 'Assignment not found or not yours.' });
     }
 
-    await Session.updateMany(
-      { assignment: assignmentId, isActive: true },
-      { isActive: false }
-    );
+    // ── Close any previously open sessions for this assignment ───────────────
+    const oldSessions = await Session.find({
+      assignment: assignmentId, isActive: true,
+    });
+    for (const old of oldSessions) {
+      await Session.findByIdAndUpdate(old._id, { isActive: false });
+      const slot = await getTodaySlot(old);
+      await reEvaluateLate(old, slot);
+      await autoMarkAbsent(old);
+      await Attendance.updateMany(
+        { session: old._id },
+        { $set: { 'relayTokens.$[].used': true } }
+      );
+    }
 
     const qrToken   = Session.generateToken();
     const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
@@ -95,7 +200,6 @@ export const createSession = async (req, res) => {
       qrPayload,
       expiresAt,
       location:   location || assignment.room || '',
-      // Store the geofence so every verify call can check it
       geofence: geofence
         ? {
             latitude:     geofence.latitude,
@@ -121,7 +225,7 @@ export const createSession = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DELETE /api/sessions/:id  (Lecturer ends session — kills ALL relay tokens)
+// DELETE /api/sessions/:id  (Lecturer ends session manually)
 // ─────────────────────────────────────────────────────────────────────────────
 export const endSession = async (req, res) => {
   try {
@@ -136,13 +240,25 @@ export const endSession = async (req, res) => {
     );
     if (!session) return res.status(404).json({ message: 'Session not found.' });
 
-    // Nuke every relay token in every attendance record for this session
+    // Revoke all relay tokens
     await Attendance.updateMany(
       { session: req.params.id },
       { $set: { 'relayTokens.$[].used': true } }
     );
 
-    res.json({ message: 'Session ended. All relay tokens revoked.' });
+    // Re-evaluate late records then auto-mark absentees
+    const slot = await getTodaySlot(session);
+    await reEvaluateLate(session, slot);
+    await autoMarkAbsent(session);
+
+    const absentCount = await Attendance.countDocuments({
+      session: session._id, status: 'failed', autoMarked: true,
+    });
+
+    res.json({
+      message:      'Session ended. All relay tokens revoked.',
+      absentMarked: absentCount,
+    });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -181,19 +297,6 @@ export const getSessionStats = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sessions/verify  (Student marks attendance)
-//
-// ╔══════════════════════ CANDLELIGHT + GEOFENCE ══════════════════════╗
-// ║                                                                    ║
-// ║  Every scan (original OR relay) requires the student's device      ║
-// ║  to be inside the classroom geofence.                              ║
-// ║                                                                    ║
-// ║  After verifying, a student can request as many relay tokens as    ║
-// ║  they like via POST /api/sessions/request-relay — but ONLY while   ║
-// ║  their device is still inside the geofence.                        ║
-// ║                                                                    ║
-// ║  Each relay token is single-use and burned on scan.                ║
-// ║  Lecturer ending the session burns ALL tokens immediately.         ║
-// ╚════════════════════════════════════════════════════════════════════╝
 // ─────────────────────────────────────────────────────────────────────────────
 export const verifyAndMarkAttendance = async (req, res) => {
   try {
@@ -235,12 +338,9 @@ export const verifyAndMarkAttendance = async (req, res) => {
       return res.status(400).json({ message: 'QR code has expired.' });
     }
 
-    // ── 4. GEOFENCE CHECK — only enforced if lecturer set a geofence centre ──
-    // If geofence.latitude is null the session has no boundary set — allow
-    // attendance without location (covers offline / indoor GPS-weak scenarios).
+    // ── 4. Geofence ───────────────────────────────────────────────────────────
     const hasGeofence = session.geofence?.latitude != null &&
                         session.geofence?.longitude != null;
-
     if (hasGeofence) {
       if (latitude == null || longitude == null) {
         return res.status(400).json({
@@ -254,26 +354,21 @@ export const verifyAndMarkAttendance = async (req, res) => {
       }
     }
 
-    // ── 5. RELAY CHAIN VALIDATION ─────────────────────────────────────────────
+    // ── 5. Relay chain validation ─────────────────────────────────────────────
     if (relay === true) {
       if (!relayToken) {
         return res.status(400).json({ message: 'Relay QR is missing its token.' });
       }
-
-      // Find the attendance record that contains this unused relay token
       const relaySource = await Attendance.findOne({
         session:              session._id,
         'relayTokens.token':  relayToken,
         'relayTokens.used':   false,
       });
-
       if (!relaySource) {
         return res.status(400).json({
           message: 'This relay QR has already been used or the session ended. Ask a different classmate.',
         });
       }
-
-      // BURN this specific token — atomic update on the matching array element
       await Attendance.updateOne(
         { _id: relaySource._id, 'relayTokens.token': relayToken },
         { $set: { 'relayTokens.$.used': true } }
@@ -301,7 +396,7 @@ export const verifyAndMarkAttendance = async (req, res) => {
       });
     }
 
-    // ── 8. Biometric + face checks ────────────────────────────────────────────
+    // ── 8. Biometric + face ───────────────────────────────────────────────────
     if (!biometricPassed) {
       return res.status(400).json({ message: 'Biometric verification failed.' });
     }
@@ -312,15 +407,29 @@ export const verifyAndMarkAttendance = async (req, res) => {
       });
     }
 
-    // ── 9. Digital signature ──────────────────────────────────────────────────
+    // ── 9. Late detection ─────────────────────────────────────────────────────
+    // Compare current wall-clock time against the timetable end-time for today.
+    // If attendance is signed AFTER the class end-time → mark as 'late'.
+    const slot = await getTodaySlot(session);
+    let status = 'present';
+
+    if (slot?.endTime) {
+      const [endH, endM] = slot.endTime.split(':').map(Number);
+      const classEnd = new Date();
+      classEnd.setHours(endH, endM, 0, 0);
+      if (new Date() > classEnd) {
+        status = 'late';
+      }
+    }
+
+    // ── 10. Digital signature ─────────────────────────────────────────────────
     const timestamp        = Date.now();
     const digitalSignature = generateSignature(
       studentId, session._id.toString(), timestamp
     );
 
-    // ── 10. Write attendance record ───────────────────────────────────────────
-    // Generate the first relay token for this student immediately
-    const nonce          = crypto.randomBytes(8).toString('hex');
+    // ── 11. Write attendance record ───────────────────────────────────────────
+    const nonce           = crypto.randomBytes(8).toString('hex');
     const firstRelayToken = generateRelayToken(
       `pre_${studentId}`, studentId, session._id.toString(), nonce
     );
@@ -337,14 +446,13 @@ export const verifyAndMarkAttendance = async (req, res) => {
       faceConfidence:    faceScore,
       digitalSignature,
       signedAt:          new Date(timestamp),
-      status:            'present',
+      status,                          // 'present' or 'late'
       location:          { latitude, longitude },
       chainDepth:        relay === true ? (parsed.chainDepth ?? 0) + 1 : 1,
-      // Start with one relay token — student can request more while in geofence
       relayTokens: [{ token: firstRelayToken, used: false, issuedAt: new Date() }],
     });
 
-    // Regenerate with real attendanceId now that we have it
+    // Regenerate relay token with real attendanceId
     const finalRelayToken = generateRelayToken(
       attendance._id.toString(), studentId, session._id.toString(), nonce
     );
@@ -353,7 +461,7 @@ export const verifyAndMarkAttendance = async (req, res) => {
       { $set: { 'relayTokens.$.token': finalRelayToken } }
     );
 
-    // ── 11. Build first relay QR payload ──────────────────────────────────────
+    // ── 12. Build first relay QR payload ──────────────────────────────────────
     const relayQrPayload = JSON.stringify({
       t:          qrToken,
       a:          assignmentId,
@@ -369,6 +477,7 @@ export const verifyAndMarkAttendance = async (req, res) => {
     res.status(201).json({
       message:          'Attendance marked successfully.',
       attendanceId:     attendance._id,
+      status,                          // tells the app if they were marked late
       digitalSignature,
       signedAt:         attendance.signedAt,
       verifications: {
@@ -378,9 +487,8 @@ export const verifyAndMarkAttendance = async (req, res) => {
         faceScore: `${(faceScore * 100).toFixed(0)}%`,
       },
       candlelight: {
-        relayQrPayload,           // first relay QR — show immediately
-        chainDepth: attendance.chainDepth,
-        // Student can call /request-relay to get more tokens while in geofence
+        relayQrPayload,
+        chainDepth:     attendance.chainDepth,
         canRequestMore: true,
       },
     });
@@ -391,11 +499,6 @@ export const verifyAndMarkAttendance = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sessions/request-relay
-// Called by a verified student who wants another relay token to give to a
-// second (or third…) classmate. Only works if:
-//   (a) student already has a verified attendance record for this session
-//   (b) student's device is still inside the classroom geofence
-//   (c) the session is still active
 // ─────────────────────────────────────────────────────────────────────────────
 export const requestRelayToken = async (req, res) => {
   try {
@@ -412,13 +515,11 @@ export const requestRelayToken = async (req, res) => {
 
     const studentId = (req.user._id ?? req.user.id).toString();
 
-    // ── Check session is still active ─────────────────────────────────────────
     const session = await Session.findOne({ _id: sessionId, isActive: true });
     if (!session) {
       return res.status(400).json({ message: 'Session is no longer active.' });
     }
 
-    // ── Geofence check — only if session has a boundary configured ───────────
     const hasGeofence = session.geofence?.latitude != null &&
                         session.geofence?.longitude != null;
     if (hasGeofence && !isInsideGeofence(session, latitude, longitude)) {
@@ -427,7 +528,6 @@ export const requestRelayToken = async (req, res) => {
       });
     }
 
-    // ── Confirm this student is already verified for this session ─────────────
     const attendance = await Attendance.findOne({
       session: sessionId, student: studentId,
     });
@@ -437,20 +537,17 @@ export const requestRelayToken = async (req, res) => {
       });
     }
 
-    // ── Generate a fresh single-use relay token ────────────────────────────────
-    const nonce     = crypto.randomBytes(8).toString('hex');
-    const newToken  = generateRelayToken(
+    const nonce    = crypto.randomBytes(8).toString('hex');
+    const newToken = generateRelayToken(
       attendance._id.toString(), studentId, sessionId, nonce
     );
 
-    // Push it into the student's relay token array
     await Attendance.updateOne(
       { _id: attendance._id },
       { $push: { relayTokens: { token: newToken, used: false, issuedAt: new Date() } } }
     );
 
-    // Build the relay QR payload
-    const session2   = await Session.findById(sessionId); // re-fetch for qrToken
+    const session2 = await Session.findById(sessionId);
     const relayQrPayload = JSON.stringify({
       t:          session2.qrToken,
       a:          attendance.assignment.toString(),
@@ -463,10 +560,7 @@ export const requestRelayToken = async (req, res) => {
       chainDepth: attendance.chainDepth,
     });
 
-    res.status(201).json({
-      message:         'New relay token issued.',
-      relayQrPayload,
-    });
+    res.status(201).json({ message: 'New relay token issued.', relayQrPayload });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
