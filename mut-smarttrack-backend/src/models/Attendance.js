@@ -36,7 +36,6 @@ const attendanceSchema = new mongoose.Schema({
   },
 
   // ── CANDLELIGHT + GEOFENCE relay fields ────────────────────────────────────
-  //
   // A verified student can generate MULTIPLE relay tokens but only while
   // physically inside the classroom geofence. Each token is still single-use.
   //
