@@ -23,7 +23,7 @@ import '../features/attendance/presentation/screens/pages/home/admin_home_page.d
 // ── Timetable pages (role-specific) ──────────────────────────────────────────
 import '../features/attendance/presentation/screens/student/student_timetable_page.dart';
 import '../features/attendance/presentation/screens/lecturer/lecturer_timetable_page.dart';
-
+import '../features/attendance/presentation/screens/lecturer/timetable_import_page.dart';
 // ── ApiService ────────────────────────────────────────────────────────────────
 import './services/api_service.dart';
 
@@ -102,10 +102,17 @@ final GoRouter appRouter = GoRouter(
       path: '/student-timetable',
       builder: (_, __) => const StudentTimetablePage(),
     ),
+
     GoRoute(
-      path: '/lecturer-timetable',
-      builder: (_, __) => const LecturerTimetablePage(),
+  path: '/lecturer-timetable',
+  builder: (_, __) => const LecturerTimetablePage(),
+  routes: [
+    GoRoute(
+      path: 'import',                          // → /lecturer-timetable/import
+      builder: (_, __) => const TimetableImportPage(),
     ),
+  ],
+),
 
     // ── Shared pages ─────────────────────────────────────────────────────────
     GoRoute(path: '/history',       builder: (_, __) => const HistoryPage()),

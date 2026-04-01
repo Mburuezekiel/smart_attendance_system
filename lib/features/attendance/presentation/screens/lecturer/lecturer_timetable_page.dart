@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_nav_bar/google_nav_bar.dart';
 import '../../../../../core/services/api_service.dart';
+import './timetable_import_page.dart';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -18,11 +19,11 @@ const _kDayShortL = ['Mon','Tue','Wed','Thu','Fri','Sat'];
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
-/// 0=Mon … 4=Fri. Saturday clamps to 5. Sunday clamps to 0.
+/// 0=Mon … 5=Sat. Sunday clamps to 0.
 int _todayIdxL() {
   final w = DateTime.now().weekday; // 1=Mon … 7=Sun
-  if (w >= 1 && w <= 6) return w - 1;  // Mon-Sat → 0-5
-  return 0;                             // Sun → show Monday
+  if (w >= 1 && w <= 6) return w - 1;
+  return 0; // Sun → show Monday
 }
 
 /// "HH:mm" or "H:mm" → minutes since midnight.
@@ -49,7 +50,6 @@ Color _unitColorL(String code) {
 enum _ClassStatusL { now, upNext, none }
 
 /// Compute statuses for an entire sorted day list at once.
-/// Guarantees exactly one UP-NEXT — the first class whose start is in the future.
 List<_ClassStatusL> _computeStatusesL(
     List<Map<String, dynamic>> entries, {required bool isToday}) {
   if (!isToday) return List.filled(entries.length, _ClassStatusL.none);
@@ -73,7 +73,8 @@ List<_ClassStatusL> _computeStatusesL(
 
 class LecturerTimetablePage extends StatefulWidget {
   const LecturerTimetablePage({super.key});
-  @override State<LecturerTimetablePage> createState() => _LecturerTimetableState();
+  @override State<LecturerTimetablePage> createState() =>
+      _LecturerTimetableState();
 }
 
 class _LecturerTimetableState extends State<LecturerTimetablePage>
@@ -112,7 +113,6 @@ class _LecturerTimetableState extends State<LecturerTimetablePage>
     });
   }
 
-  /// Returns entries for the given day sorted morning → evening.
   List<Map<String, dynamic>> _dayEntries(int idx) =>
       (_tt.where((e) => e['day'] == _kDaysL[idx]).toList()
         ..sort((a, b) => _sortKeyL(a).compareTo(_sortKeyL(b))));
@@ -133,6 +133,15 @@ class _LecturerTimetableState extends State<LecturerTimetablePage>
   void _onDeleted(String id) =>
       setState(() => _tt.removeWhere((e) => e['_id'] == id));
 
+  /// Navigate to the import page then refresh on return.
+  Future<void> _openImport() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const TimetableImportPage()),
+    );
+    if (mounted) _loadAll();
+  }
+
   @override
   Widget build(BuildContext context) {
     final entries  = _dayEntries(_dayIdx);
@@ -142,17 +151,15 @@ class _LecturerTimetableState extends State<LecturerTimetablePage>
     return Scaffold(
       backgroundColor: const Color(0xFFF4F6F8),
       floatingActionButton: !_showForm && !_loading
-          ? FloatingActionButton.extended(
-              backgroundColor: _kIndigo,
-              icon: const Icon(Icons.add_rounded, color: Colors.white),
-              label: const Text('New Slot',
-                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
-              onPressed: () => setState(() => _showForm = true),
-            )
+          ? _LFab(onNew: () => setState(() => _showForm = true))
           : null,
       body: Column(children: [
-        _LHeader(totalSlots: _tt.length, todayCount: entries.length,
-            onRefresh: _loadAll),
+        _LHeader(
+          totalSlots: _tt.length,
+          todayCount: entries.length,
+          onRefresh:  _loadAll,
+          onImport:   _openImport,
+        ),
         if (!_showForm)
           _LDaySelector(dayIdx: _dayIdx, tt: _tt, onSelect: _switchDay),
         Expanded(
@@ -187,13 +194,165 @@ class _LecturerTimetableState extends State<LecturerTimetablePage>
   }
 }
 
+// ─── FAB (two actions: new slot + import) ─────────────────────────────────────
+
+class _LFab extends StatefulWidget {
+  final VoidCallback onNew;
+  const _LFab({required this.onNew});
+  @override State<_LFab> createState() => _LFabState();
+}
+
+class _LFabState extends State<_LFab> with SingleTickerProviderStateMixin {
+  bool _open = false;
+  late AnimationController _ctrl;
+  late Animation<double>   _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 220));
+    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeOut);
+  }
+
+  @override void dispose() { _ctrl.dispose(); super.dispose(); }
+
+  void _toggle() {
+    setState(() => _open = !_open);
+    _open ? _ctrl.forward() : _ctrl.reverse();
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.end,
+    children: [
+      // ── Import mini-FAB ──────────────────────────────────────────────────
+      ScaleTransition(
+        scale: _anim,
+        child: FadeTransition(
+          opacity: _anim,
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              // Label bubble
+              AnimatedOpacity(
+                opacity: _open ? 1 : 0,
+                duration: const Duration(milliseconds: 180),
+                child: Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [BoxShadow(
+                          color: Colors.black.withOpacity(.08),
+                          blurRadius: 8)]),
+                  child: const Text('Import from file',
+                      style: TextStyle(fontSize: 12,
+                          fontWeight: FontWeight.w700, color: _kIndigo)),
+                ),
+              ),
+              FloatingActionButton.small(
+                heroTag: 'fab_import',
+                backgroundColor: Colors.white,
+                foregroundColor: _kIndigo,
+                elevation: 4,
+                onPressed: () {
+                  _toggle();
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => const TimetableImportPage()),
+                  ).then((_) {
+                    // Bubble refresh up through the widget tree
+                    // The parent's _openImport already handles this,
+                    // but if FAB is tapped we trigger via callback pattern.
+                  });
+                },
+                child: const Icon(Icons.upload_file_rounded),
+              ),
+            ]),
+          ),
+        ),
+      ),
+
+      // ── New Slot mini-FAB ────────────────────────────────────────────────
+      ScaleTransition(
+        scale: _anim,
+        child: FadeTransition(
+          opacity: _anim,
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              AnimatedOpacity(
+                opacity: _open ? 1 : 0,
+                duration: const Duration(milliseconds: 180),
+                child: Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [BoxShadow(
+                          color: Colors.black.withOpacity(.08),
+                          blurRadius: 8)]),
+                  child: const Text('New slot',
+                      style: TextStyle(fontSize: 12,
+                          fontWeight: FontWeight.w700, color: _kIndigo)),
+                ),
+              ),
+              FloatingActionButton.small(
+                heroTag: 'fab_new',
+                backgroundColor: Colors.white,
+                foregroundColor: _kIndigo,
+                elevation: 4,
+                onPressed: () { _toggle(); widget.onNew(); },
+                child: const Icon(Icons.add_rounded),
+              ),
+            ]),
+          ),
+        ),
+      ),
+
+      // ── Main FAB ────────────────────────────────────────────────────────
+      FloatingActionButton.extended(
+        heroTag: 'fab_main',
+        backgroundColor: _kIndigo,
+        icon: AnimatedRotation(
+          turns: _open ? .125 : 0,
+          duration: const Duration(milliseconds: 220),
+          child: const Icon(Icons.add_rounded, color: Colors.white),
+        ),
+        label: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 200),
+          child: Text(
+            _open ? 'Close' : 'Add Slot',
+            key: ValueKey(_open),
+            style: const TextStyle(
+                color: Colors.white, fontWeight: FontWeight.w700),
+          ),
+        ),
+        onPressed: _toggle,
+      ),
+    ],
+  );
+}
+
 // ─── Header ───────────────────────────────────────────────────────────────────
 
 class _LHeader extends StatelessWidget {
   final int totalSlots, todayCount;
   final VoidCallback onRefresh;
-  const _LHeader({required this.totalSlots, required this.todayCount,
-      required this.onRefresh});
+  final VoidCallback onImport;
+  const _LHeader({
+    required this.totalSlots,
+    required this.todayCount,
+    required this.onRefresh,
+    required this.onImport,
+  });
 
   @override
   Widget build(BuildContext context) => Container(
@@ -203,22 +362,27 @@ class _LHeader extends StatelessWidget {
           begin: Alignment.topLeft, end: Alignment.bottomRight),
     ),
     child: SafeArea(bottom: false, child: Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 8, 20),
+      padding: const EdgeInsets.fromLTRB(20, 16, 4, 20),
       child: Row(children: [
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+
+        // Title + subtitle
+        Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             Icon(Icons.calendar_month_rounded,
                 color: Colors.white.withOpacity(.8), size: 18),
             const SizedBox(width: 8),
             const Text('My Timetable', style: TextStyle(
-                fontSize: 22, fontWeight: FontWeight.w800, color: Colors.white)),
+                fontSize: 22, fontWeight: FontWeight.w800,
+                color: Colors.white)),
           ]),
           const SizedBox(height: 4),
           Text('$totalSlots slot${totalSlots != 1 ? 's' : ''} scheduled',
               style: TextStyle(
                   fontSize: 12, color: Colors.white.withOpacity(.75))),
         ])),
+
+        // Today badge
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
@@ -226,11 +390,23 @@ class _LHeader extends StatelessWidget {
               borderRadius: BorderRadius.circular(14)),
           child: Column(children: [
             Text('$todayCount', style: const TextStyle(
-                fontSize: 22, fontWeight: FontWeight.w900, color: Colors.white)),
+                fontSize: 22, fontWeight: FontWeight.w900,
+                color: Colors.white)),
             Text('today', style: TextStyle(
                 fontSize: 10, color: Colors.white.withOpacity(.8))),
           ]),
         ),
+
+        // Import button
+        Tooltip(
+          message: 'Import timetable',
+          child: IconButton(
+            icon: const Icon(Icons.upload_file_rounded, color: Colors.white),
+            onPressed: onImport,
+          ),
+        ),
+
+        // Refresh button
         IconButton(
           icon: const Icon(Icons.refresh_rounded, color: Colors.white),
           onPressed: onRefresh,
@@ -265,8 +441,8 @@ class _LDaySelector extends StatelessWidget {
             margin: EdgeInsets.only(right: i < _kDaysL.length - 1 ? 6 : 0),
             padding: const EdgeInsets.symmetric(vertical: 9),
             decoration: BoxDecoration(
-              color: sel ? Colors.white : Colors.white.withOpacity(.15),
-              borderRadius: BorderRadius.circular(12)),
+                color: sel ? Colors.white : Colors.white.withOpacity(.15),
+                borderRadius: BorderRadius.circular(12)),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               Text(_kDayShortL[i], style: TextStyle(
                   fontSize: 11, fontWeight: FontWeight.w700,
@@ -280,11 +456,13 @@ class _LDaySelector extends StatelessWidget {
               if (count > 0) ...[
                 const SizedBox(height: 2),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 4, vertical: 1),
                   decoration: BoxDecoration(
-                    color: sel ? _kIndigo.withOpacity(.15)
-                               : Colors.white.withOpacity(.3),
-                    borderRadius: BorderRadius.circular(6)),
+                      color: sel
+                          ? _kIndigo.withOpacity(.15)
+                          : Colors.white.withOpacity(.3),
+                      borderRadius: BorderRadius.circular(6)),
                   child: Text('$count', style: TextStyle(
                       fontSize: 9, fontWeight: FontWeight.w800,
                       color: sel ? _kIndigo : Colors.white)),
@@ -309,20 +487,22 @@ class _LDayView extends StatelessWidget {
   final void Function(Map<String, dynamic>) onUpdated;
   const _LDayView({required this.entries, required this.statuses,
       required this.dayName, required this.asgn,
-      required this.onRefresh, required this.onDeleted, required this.onUpdated});
+      required this.onRefresh, required this.onDeleted,
+      required this.onUpdated});
 
   @override
   Widget build(BuildContext context) {
     if (entries.isEmpty) {
       return Center(child: Column(
           mainAxisAlignment: MainAxisAlignment.center, children: [
-        Icon(Icons.event_note_rounded, size: 64, color: Colors.grey.shade300),
+        Icon(Icons.event_note_rounded, size: 64,
+            color: Colors.grey.shade300),
         const SizedBox(height: 16),
         Text('No classes on $dayName', style: TextStyle(
             fontSize: 16, fontWeight: FontWeight.w600,
             color: Colors.grey.shade400)),
         const SizedBox(height: 6),
-        Text('Tap + New Slot to add one',
+        Text('Tap + Add Slot to get started',
             style: TextStyle(fontSize: 13, color: Colors.grey.shade400)),
       ]));
     }
@@ -330,7 +510,7 @@ class _LDayView extends StatelessWidget {
       color: _kIndigo,
       onRefresh: onRefresh,
       child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 120),
         itemCount: entries.length,
         itemBuilder: (_, i) => _LecturerCard(
           entry:     entries[i],
@@ -352,9 +532,11 @@ class _LErrorView extends StatelessWidget {
   @override Widget build(BuildContext context) => GestureDetector(
     onTap: onRetry,
     child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-      Icon(Icons.cloud_off_rounded, size: 48, color: Colors.grey.shade300),
+      Icon(Icons.cloud_off_rounded, size: 48,
+          color: Colors.grey.shade300),
       const SizedBox(height: 12),
-      Text(msg, style: TextStyle(color: Colors.grey.shade500, fontSize: 13)),
+      Text(msg, style: TextStyle(
+          color: Colors.grey.shade500, fontSize: 13)),
       const SizedBox(height: 8),
       Text('Tap to retry',
           style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
@@ -384,15 +566,15 @@ Widget _LBottomNav(BuildContext context) => Container(
       if (i == 3) context.go('/settings');
     },
     tabs: const [
-      GButton(icon: Icons.home_rounded,           text: 'Home'),
-      GButton(icon: Icons.history_rounded,         text: 'History'),
-      GButton(icon: Icons.calendar_today_rounded,  text: 'Timetable'),
-      GButton(icon: Icons.settings_rounded,        text: 'Settings'),
+      GButton(icon: Icons.home_rounded,          text: 'Home'),
+      GButton(icon: Icons.history_rounded,        text: 'History'),
+      GButton(icon: Icons.calendar_today_rounded, text: 'Timetable'),
+      GButton(icon: Icons.settings_rounded,       text: 'Settings'),
     ],
   ),
 );
 
-// ─── Lecturer card (with edit / delete) ──────────────────────────────────────
+// ─── Lecturer card ────────────────────────────────────────────────────────────
 
 class _LecturerCard extends StatelessWidget {
   final Map<String, dynamic>       entry;
@@ -403,8 +585,7 @@ class _LecturerCard extends StatelessWidget {
   const _LecturerCard({required this.entry, required this.status,
       required this.asgn, required this.onDeleted, required this.onUpdated});
 
-  Color get _color =>
-      _unitColorL((entry['unit']?['code'] as String? ?? ''));
+  Color get _color => _unitColorL(entry['unit']?['code'] as String? ?? '');
 
   Future<void> _delete(BuildContext ctx) async {
     final ok = await showDialog<bool>(
@@ -429,10 +610,12 @@ class _LecturerCard extends StatelessWidget {
       if (r.success) {
         onDeleted();
         ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
-            content: Text('Slot deleted'), backgroundColor: _kIndigo));
+            content: Text('Slot deleted'),
+            backgroundColor: _kIndigo));
       } else {
         ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
-            content: Text(r.error ?? 'Failed'), backgroundColor: Colors.red));
+            content: Text(r.error ?? 'Failed'),
+            backgroundColor: Colors.red));
       }
     }
   }
@@ -481,7 +664,8 @@ class _LecturerCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: borderColor, width: borderWidth),
         boxShadow: [BoxShadow(
-            color: shadowColor, blurRadius: 14, offset: const Offset(0, 4))],
+            color: shadowColor, blurRadius: 14,
+            offset: const Offset(0, 4))],
       ),
       child: IntrinsicHeight(child: Row(children: [
 
@@ -495,11 +679,14 @@ class _LecturerCard extends StatelessWidget {
         // Time column
         SizedBox(width: 68, child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 14),
-          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+          child: Column(
+              mainAxisAlignment: MainAxisAlignment.center, children: [
             Text(start, style: const TextStyle(fontSize: 12,
-                fontWeight: FontWeight.w800, color: Color(0xFF1B1B1B))),
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1B1B1B))),
             Container(margin: const EdgeInsets.symmetric(vertical: 3),
-                width: 1, height: 10, color: Colors.grey.shade300),
+                width: 1, height: 10,
+                color: Colors.grey.shade300),
             Text(end, style: TextStyle(
                 fontSize: 11, color: Colors.grey.shade500)),
           ]),
@@ -510,22 +697,20 @@ class _LecturerCard extends StatelessWidget {
         // Content
         Expanded(child: Padding(
           padding: const EdgeInsets.all(12),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-
-            // Title + status badge
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               Expanded(child: Text(unit['name'] as String? ?? '—',
                   style: const TextStyle(fontSize: 13,
-                      fontWeight: FontWeight.w800, color: Color(0xFF1B1B1B)))),
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1B1B1B)))),
               if (status == _ClassStatusL.now)
                 _LBadge('● ONGOING', color)
               else if (status == _ClassStatusL.upNext)
                 _LBadge('▶ UP NEXT', _kPurpleL),
             ]),
-
             const SizedBox(height: 4),
             _LCodeChip(code: code, color: color),
-
             if (room.isNotEmpty) ...[
               const SizedBox(height: 6),
               Row(children: [
@@ -536,14 +721,11 @@ class _LecturerCard extends StatelessWidget {
                     fontSize: 11, color: Colors.grey.shade600)),
               ]),
             ],
-
             if (notes.isNotEmpty) ...[
               const SizedBox(height: 6),
               _LNoteBox(notes),
             ],
-
             const SizedBox(height: 8),
-            // Edit / Delete chips
             Row(children: [
               _ActionChip('Edit', Icons.edit_rounded, _kIndigo,
                   () => _edit(context)),
@@ -565,8 +747,9 @@ class _CreateSlotForm extends StatefulWidget {
   final String    selectedDay;
   final void Function(Map<String, dynamic>) onCreated;
   final VoidCallback onCancel;
-  const _CreateSlotForm({required this.assignments, required this.selectedDay,
-      required this.onCreated, required this.onCancel});
+  const _CreateSlotForm({required this.assignments,
+      required this.selectedDay, required this.onCreated,
+      required this.onCancel});
   @override State<_CreateSlotForm> createState() => _CreateSlotFormState();
 }
 
@@ -578,14 +761,21 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
   bool    _saving = false;
   String? _error;
 
-  @override void initState() { super.initState(); _day = widget.selectedDay; }
-  @override void dispose() { _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); }
+  @override void initState() {
+    super.initState();
+    _day = widget.selectedDay;
+  }
+
+  @override void dispose() {
+    _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose();
+  }
 
   Future<void> _pickTime(bool isStart) async {
     final p = (isStart ? _start : _end).split(':');
     final picked = await showTimePicker(
       context: context,
-      initialTime: TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1])),
+      initialTime: TimeOfDay(
+          hour: int.parse(p[0]), minute: int.parse(p[1])),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
             colorScheme: const ColorScheme.light(primary: _kIndigo)),
@@ -599,7 +789,8 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
 
   Future<void> _submit() async {
     if (_asgnId == null) {
-      setState(() => _error = 'Please select a unit.'); return;
+      setState(() => _error = 'Please select a unit.');
+      return;
     }
     setState(() { _saving = true; _error = null; });
     final r = await ApiService().post('/timetable', {
@@ -612,7 +803,8 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
     if (r.success) {
       widget.onCreated(r.data?['entry'] as Map<String, dynamic>? ?? {});
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Slot created!'), backgroundColor: _kIndigo));
+          content: Text('Slot created!'),
+          backgroundColor: _kIndigo));
     } else {
       setState(() => _error = r.error);
     }
@@ -628,7 +820,8 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
       _Label('Unit'),
       DropdownButtonFormField<String>(
         initialValue: _asgnId,
-        hint: const Text('Select unit…', style: TextStyle(fontSize: 13)),
+        hint: const Text('Select unit…',
+            style: TextStyle(fontSize: 13)),
         decoration: _dropDec(),
         isExpanded: true,
         items: widget.assignments.map((a) {
@@ -651,11 +844,17 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
       ),
       const SizedBox(height: 12),
       Row(children: [
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-            children: [_Label('Start'), _TimeTile(_start, () => _pickTime(true))])),
+        Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _Label('Start'),
+          _TimeTile(_start, () => _pickTime(true)),
+        ])),
         const SizedBox(width: 12),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-            children: [_Label('End'), _TimeTile(_end, () => _pickTime(false))])),
+        Expanded(child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _Label('End'),
+          _TimeTile(_end, () => _pickTime(false)),
+        ])),
       ]),
       const SizedBox(height: 12),
       _Label('Room (optional)'),
@@ -663,7 +862,8 @@ class _CreateSlotFormState extends State<_CreateSlotForm> {
       const SizedBox(height: 12),
       _Label('Notes (optional)'),
       _TF(_notesCtrl, 'Visible to students…', maxLines: 2),
-      if (_error != null) ...[const SizedBox(height: 10), _ErrorBanner(_error!)],
+      if (_error != null) ...[
+        const SizedBox(height: 10), _ErrorBanner(_error!)],
       const SizedBox(height: 20),
       _SubmitBtn(label: 'Create Slot', saving: _saving, onTap: _submit),
     ]),
@@ -690,20 +890,25 @@ class _EditSlotSheetState extends State<_EditSlotSheet> {
   @override
   void initState() {
     super.initState();
-    _day       = widget.entry['day']       as String? ?? 'Monday';
-    _start     = widget.entry['startTime'] as String? ?? '08:00';
-    _end       = widget.entry['endTime']   as String? ?? '10:00';
-    _roomCtrl  = TextEditingController(text: widget.entry['room']  as String? ?? '');
-    _notesCtrl = TextEditingController(text: widget.entry['notes'] as String? ?? '');
+    _day      = widget.entry['day']       as String? ?? 'Monday';
+    _start    = widget.entry['startTime'] as String? ?? '08:00';
+    _end      = widget.entry['endTime']   as String? ?? '10:00';
+    _roomCtrl  = TextEditingController(
+        text: widget.entry['room']  as String? ?? '');
+    _notesCtrl = TextEditingController(
+        text: widget.entry['notes'] as String? ?? '');
   }
 
-  @override void dispose() { _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose(); }
+  @override void dispose() {
+    _roomCtrl.dispose(); _notesCtrl.dispose(); super.dispose();
+  }
 
   Future<void> _pickTime(bool isStart) async {
     final p = (isStart ? _start : _end).split(':');
     final picked = await showTimePicker(
       context: context,
-      initialTime: TimeOfDay(hour: int.parse(p[0]), minute: int.parse(p[1])),
+      initialTime: TimeOfDay(
+          hour: int.parse(p[0]), minute: int.parse(p[1])),
       builder: (ctx, child) => Theme(
         data: Theme.of(ctx).copyWith(
             colorScheme: const ColorScheme.light(primary: _kIndigo)),
@@ -717,17 +922,20 @@ class _EditSlotSheetState extends State<_EditSlotSheet> {
 
   Future<void> _save() async {
     setState(() { _saving = true; _error = null; });
-    final r = await ApiService().patch('/timetable/${widget.entry['_id']}', {
+    final r = await ApiService().patch(
+        '/timetable/${widget.entry['_id']}', {
       'day': _day, 'startTime': _start, 'endTime': _end,
       'room': _roomCtrl.text.trim(), 'notes': _notesCtrl.text.trim(),
     });
     if (!mounted) return;
     setState(() => _saving = false);
     if (r.success) {
-      widget.onUpdated(r.data?['entry'] as Map<String, dynamic>? ?? {});
+      widget.onUpdated(
+          r.data?['entry'] as Map<String, dynamic>? ?? {});
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('Slot updated!'), backgroundColor: _kIndigo));
+          content: Text('Slot updated!'),
+          backgroundColor: _kIndigo));
     } else {
       setState(() => _error = r.error);
     }
@@ -739,25 +947,32 @@ class _EditSlotSheetState extends State<_EditSlotSheet> {
     builder: (_, ctrl) => Container(
       decoration: const BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+          borderRadius:
+              BorderRadius.vertical(top: Radius.circular(24))),
       child: Column(children: [
-        Container(margin: const EdgeInsets.only(top: 12), width: 40, height: 4,
-            decoration: BoxDecoration(color: Colors.grey.shade300,
+        Container(
+            margin: const EdgeInsets.only(top: 12),
+            width: 40, height: 4,
+            decoration: BoxDecoration(
+                color: Colors.grey.shade300,
                 borderRadius: BorderRadius.circular(2))),
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 14, 16, 0),
           child: Row(children: [
-            const Text('Edit Slot',
-                style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800)),
+            const Text('Edit Slot', style: TextStyle(
+                fontSize: 17, fontWeight: FontWeight.w800)),
             const Spacer(),
-            TextButton(onPressed: () => Navigator.pop(context),
+            TextButton(
+                onPressed: () => Navigator.pop(context),
                 child: const Text('Cancel')),
           ]),
         ),
         Expanded(child: SingleChildScrollView(
           controller: ctrl,
           padding: const EdgeInsets.all(16),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
             _Label('Day'),
             DropdownButtonFormField<String>(
               initialValue: _day, decoration: _dropDec(),
@@ -767,13 +982,19 @@ class _EditSlotSheetState extends State<_EditSlotSheet> {
             ),
             const SizedBox(height: 12),
             Row(children: [
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [_Label('Start'),
-                    _TimeTile(_start, () => _pickTime(true))])),
+              Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                _Label('Start'),
+                _TimeTile(_start, () => _pickTime(true)),
+              ])),
               const SizedBox(width: 12),
-              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [_Label('End'),
-                    _TimeTile(_end, () => _pickTime(false))])),
+              Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                _Label('End'),
+                _TimeTile(_end, () => _pickTime(false)),
+              ])),
             ]),
             const SizedBox(height: 12),
             _Label('Room'),
@@ -784,7 +1005,10 @@ class _EditSlotSheetState extends State<_EditSlotSheet> {
             if (_error != null) ...[
               const SizedBox(height: 10), _ErrorBanner(_error!)],
             const SizedBox(height: 20),
-            _SubmitBtn(label: 'Save Changes', saving: _saving, onTap: _save),
+            _SubmitBtn(
+                label: 'Save Changes',
+                saving: _saving,
+                onTap: _save),
           ]),
         )),
       ]),
@@ -799,7 +1023,8 @@ class _LBadge extends StatelessWidget {
   const _LBadge(this.label, this.color);
   @override Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-    decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(7)),
+    decoration: BoxDecoration(
+        color: color, borderRadius: BorderRadius.circular(7)),
     child: Text(label, style: const TextStyle(
         fontSize: 8, fontWeight: FontWeight.w900,
         color: Colors.white, letterSpacing: 0.8)),
@@ -812,7 +1037,8 @@ class _LCodeChip extends StatelessWidget {
   @override Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
     decoration: BoxDecoration(
-        color: color.withOpacity(.1), borderRadius: BorderRadius.circular(5)),
+        color: color.withOpacity(.1),
+        borderRadius: BorderRadius.circular(5)),
     child: Text(code, style: TextStyle(
         fontSize: 9, fontWeight: FontWeight.w800, color: color)),
   );
@@ -824,7 +1050,8 @@ class _LNoteBox extends StatelessWidget {
   @override Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
     decoration: BoxDecoration(
-        color: const Color(0xFFFFF8E1), borderRadius: BorderRadius.circular(8)),
+        color: const Color(0xFFFFF8E1),
+        borderRadius: BorderRadius.circular(8)),
     child: Row(children: [
       const Icon(Icons.info_outline_rounded, size: 11, color: _kAmberL),
       const SizedBox(width: 5),
@@ -843,7 +1070,8 @@ class _ActionChip extends StatelessWidget {
     child: Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-          color: color.withOpacity(.1), borderRadius: BorderRadius.circular(8)),
+          color: color.withOpacity(.1),
+          borderRadius: BorderRadius.circular(8)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(icon, size: 12, color: color),
         const SizedBox(width: 4),
@@ -873,9 +1101,11 @@ class _FormHeader extends StatelessWidget {
         onTap: onClose,
         child: Container(
           padding: const EdgeInsets.all(5),
-          decoration: BoxDecoration(color: Colors.grey.shade100,
+          decoration: BoxDecoration(
+              color: Colors.grey.shade100,
               borderRadius: BorderRadius.circular(8)),
-          child: const Icon(Icons.close_rounded, size: 16, color: Colors.grey)),
+          child: const Icon(Icons.close_rounded,
+              size: 16, color: Colors.grey)),
       ),
     ]),
   );
@@ -887,7 +1117,8 @@ class _Label extends StatelessWidget {
   @override Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: 5),
     child: Text(text, style: const TextStyle(
-        fontSize: 12, fontWeight: FontWeight.w700, color: Color(0xFF1B1B1B))),
+        fontSize: 12, fontWeight: FontWeight.w700,
+        color: Color(0xFF1B1B1B))),
   );
 }
 
@@ -912,7 +1143,8 @@ class _TimeTile extends StatelessWidget {
   );
 }
 
-Widget _TF(TextEditingController ctrl, String hint, {int maxLines = 1}) =>
+Widget _TF(TextEditingController ctrl, String hint,
+    {int maxLines = 1}) =>
     TextField(
       controller: ctrl, maxLines: maxLines,
       decoration: InputDecoration(
@@ -921,7 +1153,8 @@ Widget _TF(TextEditingController ctrl, String hint, {int maxLines = 1}) =>
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         filled: true, fillColor: const Color(0xFFF7F7F7),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+        border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
             borderSide: BorderSide(color: Colors.grey.shade200)),
         enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
@@ -933,13 +1166,17 @@ Widget _TF(TextEditingController ctrl, String hint, {int maxLines = 1}) =>
     );
 
 InputDecoration _dropDec() => InputDecoration(
-  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+  contentPadding:
+      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
   filled: true, fillColor: const Color(0xFFF7F7F7),
-  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+  border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
       borderSide: BorderSide(color: Colors.grey.shade200)),
-  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+  enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
       borderSide: BorderSide(color: Colors.grey.shade200)),
-  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+  focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
       borderSide: const BorderSide(color: _kIndigo, width: 2)),
 );
 
@@ -948,7 +1185,8 @@ class _ErrorBanner extends StatelessWidget {
   const _ErrorBanner(this.msg);
   @override Widget build(BuildContext context) => Container(
     padding: const EdgeInsets.all(10),
-    decoration: BoxDecoration(color: const Color(0xFFFFEBEE),
+    decoration: BoxDecoration(
+        color: const Color(0xFFFFEBEE),
         borderRadius: BorderRadius.circular(10)),
     child: Text(msg, style: const TextStyle(
         fontSize: 12, color: Color(0xFFE53935))),
@@ -964,15 +1202,19 @@ class _SubmitBtn extends StatelessWidget {
     child: Container(
       height: 50,
       decoration: BoxDecoration(
-        gradient: const LinearGradient(colors: [_kIndigo, _kIndigoMid]),
+        gradient: const LinearGradient(
+            colors: [_kIndigo, _kIndigoMid]),
         borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: _kIndigo.withOpacity(.25),
+        boxShadow: [BoxShadow(
+            color: _kIndigo.withOpacity(.25),
             blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: Center(child: saving
-          ? const CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
+          ? const CircularProgressIndicator(
+              color: Colors.white, strokeWidth: 2)
           : Text(label, style: const TextStyle(
-              color: Colors.white, fontSize: 14, fontWeight: FontWeight.w700))),
+              color: Colors.white, fontSize: 14,
+              fontWeight: FontWeight.w700))),
     ),
   );
 }

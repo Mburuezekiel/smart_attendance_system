@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:typed_data';                          
 import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';    
 import 'package:shared_preferences/shared_preferences.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,6 +347,68 @@ class ApiService {
     }
   }
 
+ Future<ApiResult<Map<String, dynamic>>> uploadFile(
+    String path, {
+    required Uint8List          fileBytes,
+    required String             fileName,
+    Map<String, String>         queryParams = const {},
+    String                      fileField   = 'file',       // multipart field name
+    Map<String, String>         extraFields = const {},     // extra text fields
+  }) async {
+    try {
+      var uri = Uri.parse('$baseUrl/api$path');
+      if (queryParams.isNotEmpty) {
+        uri = uri.replace(queryParameters: queryParams);
+      }
+ 
+      final token = await getToken();
+ 
+      // Build multipart request
+      final request = http.MultipartRequest('POST', uri);
+ 
+      // Auth header (no Content-Type — http sets it with boundary automatically)
+      if (token != null) {
+        request.headers['Authorization'] = 'Bearer $token';
+      }
+ 
+      // Attach the file
+      final mimeType = _mimeFromName(fileName);
+      request.files.add(http.MultipartFile.fromBytes(
+        fileField,
+        fileBytes,
+        filename: fileName,
+        contentType: MediaType.parse(mimeType),
+      ));
+ 
+      // Any extra text fields the caller wants to send alongside the file
+      request.fields.addAll(extraFields);
+ 
+      debugPrint('[API] POST (multipart) $uri  file=$fileName  size=${fileBytes.length}b');
+ 
+      final streamed = await request.send().timeout(const Duration(seconds: 60));
+      final res      = await http.Response.fromStream(streamed);
+ 
+      return _handle(res);
+    } on Exception catch (e) {
+      return ApiResult.err(_friendlyError(e));
+    }
+  }
+ 
+  /// Infer a MIME type from the file extension.
+  static String _mimeFromName(String name) {
+    final ext = name.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'pdf':  return 'application/pdf';
+      case 'doc':  return 'application/msword';
+      case 'docx': return 'application/vnd.openxmlformats-officedocument'
+                          '.wordprocessingml.document';
+      case 'png':  return 'image/png';
+      case 'jpg':
+      case 'jpeg': return 'image/jpeg';
+      default:     return 'application/octet-stream';
+    }
+  }
+
   // ── POST /api/sessions ──────────────────────────────────────────────────────
 
   Future<ApiResult<Map<String, dynamic>>> createSession({
@@ -398,5 +462,7 @@ class ApiService {
       return ApiResult.err(_friendlyError(e));
     }
   }
+
+  
 
 } // ← END OF ApiService class

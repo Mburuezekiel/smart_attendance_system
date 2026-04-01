@@ -1,6 +1,5 @@
 // lib/features/assignments/presentation/lecturer_qr_page.dart
-//
-// pubspec.yaml: qr_flutter: ^4.1.0
+
 
 import 'dart:async';
 import 'package:flutter/material.dart';
