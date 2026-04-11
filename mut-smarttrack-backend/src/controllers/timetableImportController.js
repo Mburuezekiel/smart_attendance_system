@@ -1,32 +1,14 @@
 // controllers/timetableImportController.js
-//
-// POST /api/timetable/import
-//
-// Accepts a multipart upload (field "file", PDF or DOCX) plus optional query
-// filters:  unitCodes  (comma-separated)  |  year  |  course
-//
-// Flow:
-//   1. Extract raw text from the uploaded file (pdf-parse / mammoth)
-//   2. Send text + filters to Claude claude-sonnet-4-20250514 → structured JSON slots
-//   3. Validate each slot against the lecturer's assignments
-//   4. Return a "preview" array the client can confirm before committing
-//
-// POST /api/timetable/import/confirm
-//   Body: { slots: [...] }  (the confirmed preview)
-//   Bulk-inserts into Timetable, skips duplicates gracefully.
 
-import fs            from 'fs';
-import path          from 'path';
-import Anthropic     from '@anthropic-ai/sdk';
-import pdfParse      from 'pdf-parse/lib/pdf-parse.js';
-import mammoth       from 'mammoth';
-import multer        from 'multer';
+import fs from 'fs';
+import path from 'path';
+import Anthropic from '@anthropic-ai/sdk';
+import mammoth from 'mammoth';
+import multer from 'multer';
 
-import Timetable     from '../models/Timetable.js';
-import Assignment    from '../models/Assignment.js';
-import Unit          from '../models/Unit.js';
-
-// ─── Multer (memory storage — no disk write needed) ────────────────────────
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const pdfParse = require('pdf-parse');
 
 const upload = multer({
   storage: multer.memoryStorage(),
